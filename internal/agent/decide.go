@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/analyst"
-	"github.com/ismatsamadov/trader/internal/market"
-	"github.com/ismatsamadov/trader/internal/news"
-	"github.com/ismatsamadov/trader/internal/num"
-	"github.com/ismatsamadov/trader/internal/store"
+	"github.com/wickwise/trader/internal/analyst"
+	"github.com/wickwise/trader/internal/market"
+	"github.com/wickwise/trader/internal/news"
+	"github.com/wickwise/trader/internal/num"
+	"github.com/wickwise/trader/internal/store"
 )
 
 // job is a decision waiting for the model.

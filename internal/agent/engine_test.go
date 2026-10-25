@@ -13,14 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/analyst"
-	"github.com/ismatsamadov/trader/internal/audit"
-	"github.com/ismatsamadov/trader/internal/binance"
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/news"
-	"github.com/ismatsamadov/trader/internal/num"
-	"github.com/ismatsamadov/trader/internal/telegram"
-	"github.com/ismatsamadov/trader/internal/testkit"
+	"github.com/wickwise/trader/internal/analyst"
+	"github.com/wickwise/trader/internal/audit"
+	"github.com/wickwise/trader/internal/binance"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/news"
+	"github.com/wickwise/trader/internal/num"
+	"github.com/wickwise/trader/internal/telegram"
+	"github.com/wickwise/trader/internal/testkit"
 )
 
 type rig struct {

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/binance"
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/num"
-	"github.com/ismatsamadov/trader/internal/testkit"
+	"github.com/wickwise/trader/internal/binance"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/num"
+	"github.com/wickwise/trader/internal/testkit"
 )
 
 // TestTestnetRoundTrip buys $10 of BTC on the Binance Spot Test Network and

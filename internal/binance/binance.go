@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/market"
-	"github.com/ismatsamadov/trader/internal/num"
+	"github.com/wickwise/trader/internal/market"
+	"github.com/wickwise/trader/internal/num"
 )
 
 const (

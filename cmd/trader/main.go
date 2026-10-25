@@ -21,16 +21,16 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
 
-	"github.com/ismatsamadov/trader/internal/agent"
-	"github.com/ismatsamadov/trader/internal/analyst"
-	"github.com/ismatsamadov/trader/internal/audit"
-	"github.com/ismatsamadov/trader/internal/binance"
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/fleet"
-	"github.com/ismatsamadov/trader/internal/news"
-	"github.com/ismatsamadov/trader/internal/num"
-	"github.com/ismatsamadov/trader/internal/pg"
-	"github.com/ismatsamadov/trader/internal/telegram"
+	"github.com/wickwise/trader/internal/agent"
+	"github.com/wickwise/trader/internal/analyst"
+	"github.com/wickwise/trader/internal/audit"
+	"github.com/wickwise/trader/internal/binance"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/fleet"
+	"github.com/wickwise/trader/internal/news"
+	"github.com/wickwise/trader/internal/num"
+	"github.com/wickwise/trader/internal/pg"
+	"github.com/wickwise/trader/internal/telegram"
 )
 
 const usage = `trader — AI crypto trading agent for Binance spot

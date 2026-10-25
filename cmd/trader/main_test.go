@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/agent"
-	"github.com/ismatsamadov/trader/internal/testkit"
+	"github.com/wickwise/trader/internal/agent"
+	"github.com/wickwise/trader/internal/testkit"
 )
 
 // Synthetic fixtures only: no network access and no paid requests.

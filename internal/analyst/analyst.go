@@ -18,10 +18,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/market"
-	"github.com/ismatsamadov/trader/internal/news"
-	"github.com/ismatsamadov/trader/internal/store"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/market"
+	"github.com/wickwise/trader/internal/news"
+	"github.com/wickwise/trader/internal/store"
 )
 
 // PermanentError marks failures that retrying cannot fix, such as a rejected

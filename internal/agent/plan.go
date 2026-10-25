@@ -4,10 +4,10 @@ import (
 	"errors"
 	"math"
 
-	"github.com/ismatsamadov/trader/internal/analyst"
-	"github.com/ismatsamadov/trader/internal/binance"
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/num"
+	"github.com/wickwise/trader/internal/analyst"
+	"github.com/wickwise/trader/internal/binance"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/num"
 )
 
 // Plan is one market order: a SELL of Qty coins or a BUY spending QuoteQty.

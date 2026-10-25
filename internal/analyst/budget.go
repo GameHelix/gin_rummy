@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/store"
+	"github.com/wickwise/trader/internal/store"
 	"slices"
 )
 

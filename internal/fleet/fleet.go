@@ -16,9 +16,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/pg"
-	"github.com/ismatsamadov/trader/internal/vault"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/pg"
+	"github.com/wickwise/trader/internal/vault"
 )
 
 // Refused is an error the user can fix, such as a config the plan does not

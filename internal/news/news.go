@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/ismatsamadov/trader/internal/store"
+	"github.com/wickwise/trader/internal/store"
 )
 
 // Item is one headline. Its ID is the evidence ID the analyst cites.

@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/analyst"
-	"github.com/ismatsamadov/trader/internal/news"
-	"github.com/ismatsamadov/trader/internal/num"
+	"github.com/wickwise/trader/internal/analyst"
+	"github.com/wickwise/trader/internal/news"
+	"github.com/wickwise/trader/internal/num"
 )
 
 // The events an agent records in its audit log. This is the contract the

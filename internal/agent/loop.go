@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/analyst"
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/news"
-	"github.com/ismatsamadov/trader/internal/num"
+	"github.com/wickwise/trader/internal/analyst"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/news"
+	"github.com/wickwise/trader/internal/num"
 )
 
 // tick is one pass of the loop: settle orders, refresh prices, record

@@ -24,9 +24,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/ismatsamadov/trader/internal/binance"
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/num"
+	"github.com/wickwise/trader/internal/binance"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/num"
 )
 
 // Database creates an empty database on the server in TEST_DATABASE_URL,

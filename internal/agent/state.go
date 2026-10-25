@@ -8,11 +8,11 @@ import (
 	"slices"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/analyst"
-	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/news"
-	"github.com/ismatsamadov/trader/internal/num"
-	"github.com/ismatsamadov/trader/internal/store"
+	"github.com/wickwise/trader/internal/analyst"
+	"github.com/wickwise/trader/internal/config"
+	"github.com/wickwise/trader/internal/news"
+	"github.com/wickwise/trader/internal/num"
+	"github.com/wickwise/trader/internal/store"
 )
 
 const stateVersion = "crypto-agent-v1"

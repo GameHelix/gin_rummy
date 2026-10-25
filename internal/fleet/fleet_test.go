@@ -18,12 +18,12 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
 
-	"github.com/ismatsamadov/trader/internal/agent"
-	"github.com/ismatsamadov/trader/internal/analyst"
-	"github.com/ismatsamadov/trader/internal/binance"
-	"github.com/ismatsamadov/trader/internal/pg"
-	"github.com/ismatsamadov/trader/internal/testkit"
-	"github.com/ismatsamadov/trader/internal/vault"
+	"github.com/wickwise/trader/internal/agent"
+	"github.com/wickwise/trader/internal/analyst"
+	"github.com/wickwise/trader/internal/binance"
+	"github.com/wickwise/trader/internal/pg"
+	"github.com/wickwise/trader/internal/testkit"
+	"github.com/wickwise/trader/internal/vault"
 )
 
 // service returns a fleet service on a fresh, migrated database, or skips.
