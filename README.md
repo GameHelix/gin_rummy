@@ -33,6 +33,16 @@ trader agent start|stop|status --tenant ID --agent ID
 trader agent list --tenant ID
 ```
 
+## Server
+
+Any server prepared by [wickwise/infra](https://github.com/wickwise/infra), at any cloud or your own, runs the engine:
+
+```sh
+./deploy.sh deploy@SERVER_IP   # builds for the server's CPU; ships the image, compose.yaml, config/ and .env over SSH
+```
+
+Data and the database stay on the server. Allow the server's IP on the Binance key.
+
 ## Engine API
 
 The app's only way in, on `127.0.0.1:8080` with `Authorization: Bearer $ENGINE_API_TOKEN`. It does everything Telegram can (status, decide, stop, resume, sell all) and manages tenants, plans, keys, agents and configs; each agent's audit log comes as history or a live stream. The contract is [api/openapi.yaml](api/openapi.yaml); package `api` is its Go client.
