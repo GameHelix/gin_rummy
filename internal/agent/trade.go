@@ -132,6 +132,9 @@ func (e *Engine) book(ctx context.Context, id int, o binance.Order) (*Trade, err
 	price := o.QuoteQty.Div(o.ExecutedQty)
 	var feeBase, feeQuote, feeOther num.Dec
 	for _, f := range o.Fills {
+		if f.Commission.IsZero() {
+			continue // the testnet charges no fees
+		}
 		switch f.CommissionAsset {
 		case c.Base(o.Symbol):
 			feeBase = feeBase.Add(f.Commission)
