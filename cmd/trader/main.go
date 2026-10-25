@@ -19,7 +19,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
-	"github.com/ismatsamadov/trader/internal/trader"
+	"github.com/ismatsamadov/trader/internal/agent"
+	"github.com/ismatsamadov/trader/internal/analyst"
+	"github.com/ismatsamadov/trader/internal/config"
+	"github.com/ismatsamadov/trader/internal/market"
 )
 
 const usage = `trader — real-time paper-trading agent for US stocks (no real orders)
@@ -59,7 +62,7 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		fmt.Fprintln(out, usage)
 		return nil
 	}
-	if err := trader.LoadEnv(".env"); err != nil {
+	if err := config.LoadEnv(".env"); err != nil {
 		return err
 	}
 	if e.HTTP == nil {
@@ -113,39 +116,39 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 	if cmd == "models" {
 		return listModels(ctx, out, e)
 	}
-	c, err := trader.LoadConfig(*configPath)
+	c, err := config.LoadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	budget := &trader.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: e.Now}
+	budget := &analyst.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: e.Now}
 	switch cmd {
 	case "init":
-		st, err := trader.InitState(c, e.Now())
+		st, err := agent.InitState(c, e.Now())
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "created %s: $%.2f paper cash (%s)\n", st.Name, st.InitialCash.Dollars(), trader.StatePath(c))
+		fmt.Fprintf(out, "created %s: $%.2f paper cash (%s)\n", st.Name, st.InitialCash.Dollars(), agent.StatePath(c))
 		return nil
 	case "run":
-		agent, err := newAgent(c, budget, e, nil, !*dryRun)
+		runner, err := newAgent(c, budget, e, nil, !*dryRun)
 		if err != nil {
 			return err
 		}
-		rep, err := agent.RunCycle(ctx, *dryRun)
+		rep, err := runner.RunCycle(ctx, *dryRun)
 		printCycle(out, rep)
 		return err
 	case "daemon":
-		agent, err := newAgent(c, budget, e, out, true)
+		runner, err := newAgent(c, budget, e, out, true)
 		if err != nil {
 			return err
 		}
-		if _, err := agent.Analyst.Client.Models.Get(ctx, c.Model, anthropic.ModelGetParams{}); err != nil {
+		if _, err := runner.Analyst.Client.Models.Get(ctx, c.Model, anthropic.ModelGetParams{}); err != nil {
 			return fmt.Errorf("TRADER_MODEL is not available to this API key (see `trader models`): %w", err)
 		}
 		fmt.Fprintf(out, "trader daemon: %s\n", c.Name)
-		return agent.Daemon(ctx)
+		return runner.Daemon(ctx)
 	case "status":
-		st, err := trader.LoadState(c)
+		st, err := agent.LoadState(c)
 		if err != nil {
 			return err
 		}
@@ -153,7 +156,7 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		if err != nil {
 			return err
 		}
-		report := trader.BuildStatus(c, st, &summary, e.Now())
+		report := agent.BuildStatus(c, st, &summary, e.Now())
 		if *asJSON {
 			return writeJSON(out, report)
 		}
@@ -194,16 +197,16 @@ func anthropicClient(key string, e env) anthropic.Client {
 }
 
 // newAgent wires the agent; log is nil for one-off runs, which print only a summary.
-func newAgent(c trader.Config, budget *trader.Budget, e env, log io.Writer, withAnalyst bool) (*trader.Agent, error) {
-	agent := &trader.Agent{Config: c, Market: trader.MarketSource{HTTP: e.HTTP, BaseURL: e.MarketURL}, Now: e.Now, Sleep: e.Sleep, Log: log}
+func newAgent(c config.Config, budget *analyst.Budget, e env, log io.Writer, withAnalyst bool) (*agent.Agent, error) {
+	a := &agent.Agent{Config: c, Market: market.PriceSource{HTTP: e.HTTP, BaseURL: e.MarketURL}, Now: e.Now, Sleep: e.Sleep, Log: log}
 	if withAnalyst {
 		key := apiKey()
 		if key == "" {
 			return nil, errors.New("set ANTHROPIC_API_KEY in .env or the environment to run the analyst")
 		}
-		agent.Analyst = &trader.Analyst{Config: c, Client: anthropicClient(key, e), News: trader.NewsSource{HTTP: e.HTTP, BaseURL: e.NewsURL}, Budget: budget, Log: log, Sleep: e.Sleep}
+		a.Analyst = &analyst.Analyst{Config: c, Client: anthropicClient(key, e), News: market.NewsSource{HTTP: e.HTTP, BaseURL: e.NewsURL}, Budget: budget, Log: log, Sleep: e.Sleep}
 	}
-	return agent, nil
+	return a, nil
 }
 
 func listModels(ctx context.Context, out io.Writer, e env) error {
@@ -220,7 +223,7 @@ func listModels(ctx context.Context, out io.Writer, e env) error {
 	return pager.Err()
 }
 
-func printCycle(out io.Writer, rep trader.CycleReport) {
+func printCycle(out io.Writer, rep agent.CycleReport) {
 	if rep.Status == "" {
 		return
 	}

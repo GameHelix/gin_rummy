@@ -1,7 +1,3 @@
-# Runs the agent as a long-lived service: one cycle after every NYSE close.
-#   docker compose up -d --build        start (or rebuild and restart)
-#   docker compose logs -f              follow what it is doing
-#   docker compose run --rm trader status
 services:
   trader:
     build: .

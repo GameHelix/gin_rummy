@@ -14,7 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ismatsamadov/trader/internal/trader"
+	"github.com/ismatsamadov/trader/internal/agent"
+	"github.com/ismatsamadov/trader/internal/market"
 )
 
 // Synthetic fixtures only: no network access and no paid requests.
@@ -41,7 +42,7 @@ func writeConfig(t *testing.T) string {
 
 func marketServer(t *testing.T) *httptest.Server {
 	ny, _ := time.LoadLocation("America/New_York")
-	sessions, _ := trader.NYSESessions("2026-01-02", "2026-10-23")
+	sessions, _ := market.NYSESessions("2026-01-02", "2026-10-23")
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		symbol := strings.TrimPrefix(r.URL.Path, "/v8/finance/chart/")
 		var ts []int64
@@ -148,7 +149,7 @@ func TestInitDryRunRunAndStatus(t *testing.T) {
 	if err := run(ctx, []string{"status", "--json", "--config", cfg}, &out, e); err != nil {
 		t.Fatal(err)
 	}
-	var report trader.StatusReport
+	var report agent.StatusReport
 	if err := json.Unmarshal(out.Bytes(), &report); err != nil || len(report.Pending) != 1 || report.LastSession != "2026-10-23" {
 		t.Fatalf("status json: %v %+v", err, report)
 	}

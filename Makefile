@@ -17,11 +17,9 @@ build:
 init:
 	go run ./cmd/trader init --config $(CONFIG)
 
-# Live market data, no model call, nothing saved.
 dry-run:
 	go run ./cmd/trader run --dry-run --config $(CONFIG)
 
-# Makes paid Anthropic requests, bounded by the configured daily and monthly caps.
 run:
 	go run ./cmd/trader run --config $(CONFIG)
 
@@ -31,7 +29,6 @@ daemon:
 status:
 	go run ./cmd/trader status --config $(CONFIG)
 
-# Docker runner: the daemon as a service, sharing ./data with the local binary.
 .PHONY: docker-up docker-logs docker-status docker-down
 docker-up:
 	docker compose up -d --build

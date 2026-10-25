@@ -5,7 +5,7 @@ A real-time paper-trading agent for US stocks. After every NYSE close, an advanc
 ## Run
 
 ```sh
-cp .env.example .env                      # set ANTHROPIC_API_KEY and TRADER_MODEL
+cp .env.example .env                      # add your ANTHROPIC_API_KEY
 docker compose run --rm trader init       # once
 docker compose up -d --build              # one cycle after every close
 docker compose run --rm trader status     # agent vs buy-and-hold
