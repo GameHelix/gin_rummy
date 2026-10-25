@@ -19,7 +19,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/ismatsamadov/trader/internal/analyst"
+	"github.com/ismatsamadov/trader/internal/audit"
 	"github.com/ismatsamadov/trader/internal/binance"
 	"github.com/ismatsamadov/trader/internal/config"
 	"github.com/ismatsamadov/trader/internal/news"
@@ -38,6 +41,7 @@ type Engine struct {
 	Log      io.Writer
 
 	st        State
+	events    *audit.Log
 	rules     map[string]binance.Symbol
 	prices    map[string]num.Dec
 	live      map[string]num.Dec
@@ -251,12 +255,51 @@ func (e *Engine) Init(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	now := e.now()
+	tenant, agent := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	st := State{
-		Version: stateVersion, Mode: c.Mode, Name: c.Name, Symbols: c.Symbols, CreatedAt: now, Nonce: nonce.Text(36),
+		Version: stateVersion, TenantID: tenant.String(), AgentID: agent.String(), Mode: c.Mode, Name: c.Name, Symbols: c.Symbols, CreatedAt: now, Nonce: nonce.Text(36),
 		Capital: capital, RiskBase: capital, TakerFee: e.feeRate(acct.Taker), Ledger: Ledger{Cash: capital, Holdings: map[string]num.Dec{}},
 		Benchmark: buyAndHold(c, capital, prices, e.feeRate(acct.Taker)), Day: now.Format(time.DateOnly), DayEquity: capital, NextID: 1,
 	}
+	log, err := audit.Open(EventsDir(c), tenant, agent, e.Now)
+	if err != nil {
+		return State{}, err
+	}
+	defer log.Close()
+	if _, err := log.Append(evAccountCreated, accountCreated{Mode: c.Mode, Name: c.Name, Symbols: c.Symbols, Quote: c.QuoteAsset, Capital: capital}); err != nil {
+		return State{}, err
+	}
 	return st, saveState(c, st)
+}
+
+// EventsDir is where an account's audit log lives.
+func EventsDir(c config.Config) string { return filepath.Join(c.Dir(), "events") }
+
+// openEvents opens the audit log, giving an account from before the log
+// existed its tenant and agent IDs first.
+func (e *Engine) openEvents() error {
+	if e.st.TenantID == "" || e.st.AgentID == "" {
+		e.st.TenantID, e.st.AgentID = uuid.Must(uuid.NewV7()).String(), uuid.Must(uuid.NewV7()).String()
+	}
+	tenant, err := uuid.Parse(e.st.TenantID)
+	if err != nil {
+		return err
+	}
+	agent, err := uuid.Parse(e.st.AgentID)
+	if err != nil {
+		return err
+	}
+	if e.events != nil {
+		e.events.Close()
+	}
+	e.events, err = audit.Open(EventsDir(e.Config), tenant, agent, e.Now)
+	if err != nil {
+		return err
+	}
+	if e.Analyst != nil {
+		e.Analyst.Observe = func(c analyst.ModelCall) { e.emit(evModelCall, c) }
+	}
+	return nil
 }
 
 // simulatedFee is Binance's standard spot fee. The testnet charges none, so
@@ -289,6 +332,9 @@ func (e *Engine) open(ctx context.Context) error {
 		return err
 	}
 	e.st, e.saved = st, nil
+	if err := e.openEvents(); err != nil {
+		return fmt.Errorf("audit log: %w", err)
+	}
 	if e.inbox == nil {
 		e.inbox = make(chan inbound, 16)
 	}
@@ -306,6 +352,9 @@ func (e *Engine) open(ctx context.Context) error {
 	}
 	e.checkLedger(ctx)
 	e.reconcile(ctx)
+	if err := e.emit(evAgentStarted, agentStarted{Mode: e.Config.Mode, Config: fingerprint(e.Config), Model: fingerprint(e.Config.Model), Cash: e.st.Ledger.Cash, Holdings: e.st.Ledger.Holdings, Halted: e.st.Halted}); err != nil {
+		return fmt.Errorf("audit log: %w", err)
+	}
 	return e.save()
 }
 
@@ -451,8 +500,10 @@ func (e *Engine) checkInbox() {
 				switch in.cmd.Name {
 				case "stop":
 					e.st.Halted, e.st.HaltKind = stopReason, haltManual
+					e.emit(evHalted, halted{haltManual, stopReason})
 				case "sellall":
 					e.st.Halted, e.st.HaltKind, e.st.Liquidate = sellAllReason, haltManual, true
+					e.emit(evHalted, halted{haltManual, sellAllReason})
 				}
 			}
 			e.later = append(e.later, in)
@@ -481,6 +532,7 @@ func (e *Engine) handle(ctx context.Context, in inbound) {
 	defer e.saveOrAlert(ctx)
 	e.st.TelegramOffset = max(e.st.TelegramOffset, in.offset)
 	c := in.cmd
+	e.emit(evCommand, commandReceived{Name: c.Name, Source: "telegram", Sent: c.Sent, Received: in.received, Ignored: stale(in)})
 	if stale(in) {
 		e.notify(ctx, fmt.Sprintf("⚠️ Ignored /%s: it was sent at %s while I was offline.", c.Name, c.Sent.Format("Jan 2 15:04 UTC")))
 		return
@@ -489,9 +541,15 @@ func (e *Engine) handle(ctx context.Context, in inbound) {
 	case "status":
 		e.notify(ctx, e.statusText(ctx))
 	case "stop":
+		if e.st.Halted != stopReason {
+			e.emit(evHalted, halted{haltManual, stopReason})
+		}
 		e.st.Halted, e.st.HaltKind = stopReason, haltManual
 		e.notify(ctx, "🛑 Trading stopped. Holdings are kept; /resume to trade again.")
 	case "sellall":
+		if e.st.Halted != sellAllReason {
+			e.emit(evHalted, halted{haltManual, sellAllReason})
+		}
 		e.st.Halted, e.st.HaltKind, e.st.Liquidate = sellAllReason, haltManual, true
 		e.notify(ctx, "🛑 Selling everything. Trading stays stopped until /resume.")
 		e.sellAll(ctx)
@@ -523,6 +581,7 @@ func (e *Engine) halt(ctx context.Context, kind, reason string) {
 		return
 	}
 	e.st.Halted, e.st.HaltKind = reason, kind
+	e.emit(evHalted, halted{kind, reason})
 	e.notify(ctx, "🛑 Trading stopped: "+reason)
 }
 
@@ -530,6 +589,7 @@ func (e *Engine) halt(ctx context.Context, kind, reason string) {
 func (e *Engine) clearHalt(kind string) {
 	if e.st.HaltKind == kind {
 		e.st.Halted, e.st.HaltKind = "", ""
+		e.emit(evResumed, resumed{By: "automatic"})
 	}
 }
 
@@ -556,6 +616,7 @@ func (e *Engine) resume(ctx context.Context) {
 	}
 	e.st.Halted, e.st.HaltKind, e.st.Liquidate, e.st.DrawdownHit = "", "", false, false
 	e.sellFails = nil
+	e.emit(evResumed, resumed{By: "user"})
 	e.reconcile(ctx)
 	if e.st.Halted == "" {
 		e.notify(ctx, "▶️ Trading resumed.")

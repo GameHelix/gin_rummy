@@ -44,14 +44,15 @@ func (e *Engine) tick(ctx context.Context) {
 	e.readNews(ctx, now)
 	if kind, trigger := e.trigger(now); trigger != "" {
 		if err := e.startDecision(ctx, kind, trigger); err != nil {
-			e.failed(ctx, now, err)
+			e.failed(ctx, now, 0, err)
 		}
 	}
 }
 
 // failed backs off after a decision could not be made. A spent budget only
 // resets with the UTC day, and the message says what that means.
-func (e *Engine) failed(ctx context.Context, now time.Time, err error) {
+func (e *Engine) failed(ctx context.Context, now time.Time, id int, err error) {
+	e.emit(evDecisionFailed, decisionFailed{Decision: id, Error: err.Error()})
 	e.st.RetryAt = now.Add(10 * time.Minute)
 	msg := "⚠️ Decision skipped: " + untrusted(err.Error()) + ". Retrying in 10 minutes."
 	if errors.Is(err, analyst.ErrBudgetExceeded) {
@@ -96,6 +97,7 @@ func (e *Engine) record(now time.Time, equity num.Dec) {
 	}
 	bench, _ := e.st.Benchmark.Equity(e.prices)
 	e.st.History = keep(append(e.st.History, Point{hour, equity, bench}), 24*90)
+	e.emit(evEquity, equityHourly{Equity: equity, Benchmark: bench, Cash: e.st.Ledger.Cash, Prices: e.prices})
 }
 
 func (e *Engine) rollover(ctx context.Context, now time.Time, equity num.Dec) {
@@ -165,7 +167,9 @@ func (e *Engine) score(ctx context.Context, now time.Time) {
 		}
 		ret := exit.Float()/oc.Entry.Float() - 1
 		score, _ := oc.Rating.Score()
-		e.st.Scored = keep(append(e.st.Scored, ScoredCall{OpenCall: oc, Exit: exit, Return: round(ret, 5), Hit: (score > 0 && ret > 0) || (score < 0 && ret < 0)}), 1000)
+		graded := ScoredCall{OpenCall: oc, Exit: exit, Return: round(ret, 5), Hit: (score > 0 && ret > 0) || (score < 0 && ret < 0)}
+		e.st.Scored = keep(append(e.st.Scored, graded), 1000)
+		e.emit(evCallGraded, graded)
 	}
 	e.st.Open = open
 }
@@ -206,6 +210,7 @@ func (e *Engine) readNews(ctx context.Context, now time.Time) {
 		return
 	}
 	e.st.NewsQueue = append(e.st.NewsQueue, alerts...)
+	e.emit(evNewsAlert, newsAlert{Items: alerts})
 	lines := []string{"📰 Market news"}
 	for _, it := range alerts[:min(3, len(alerts))] {
 		lines = append(lines, fmt.Sprintf("• %s (%s)", untrusted(it.Title), it.Source))

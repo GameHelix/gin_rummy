@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: trader
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   trader:
     build: .
     image: trader:local
@@ -6,6 +21,11 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      DATABASE_URL: postgres://trader:${POSTGRES_PASSWORD}@postgres:5432/trader?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
@@ -14,3 +34,6 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     stop_grace_period: 30s
+
+volumes:
+  pgdata:

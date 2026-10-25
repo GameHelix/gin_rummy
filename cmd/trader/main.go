@@ -19,13 +19,16 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/google/uuid"
 
 	"github.com/ismatsamadov/trader/internal/agent"
 	"github.com/ismatsamadov/trader/internal/analyst"
+	"github.com/ismatsamadov/trader/internal/audit"
 	"github.com/ismatsamadov/trader/internal/binance"
 	"github.com/ismatsamadov/trader/internal/config"
 	"github.com/ismatsamadov/trader/internal/news"
 	"github.com/ismatsamadov/trader/internal/num"
+	"github.com/ismatsamadov/trader/internal/pg"
 	"github.com/ismatsamadov/trader/internal/telegram"
 )
 
@@ -144,6 +147,11 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		if err := modelAvailable(ctx, eng, c); err != nil {
 			return err
 		}
+		if url := os.Getenv("DATABASE_URL"); url != "" {
+			if err := startShipper(ctx, url, c, out); err != nil {
+				return err
+			}
+		}
 		fmt.Fprintf(out, "trader %s on %s\n", c.Name, c.Mode)
 		return eng.Run(ctx)
 	case "decide":
@@ -236,6 +244,36 @@ func exchangeClient(base *http.Client) *http.Client {
 	return &c
 }
 
+// startShipper copies the engine's audit log to Postgres in the background.
+// The log on disk stays the record; the database catches up after an outage.
+func startShipper(ctx context.Context, url string, c config.Config, out io.Writer) error {
+	if err := pg.Migrate(ctx, url); err != nil {
+		return err
+	}
+	store, err := pg.Open(ctx, url)
+	if err != nil {
+		return err
+	}
+	dir := agent.EventsDir(c)
+	var who pg.Agent
+	identify := func() (pg.Agent, bool) {
+		if who.ID == uuid.Nil {
+			events, err := audit.ReadAfter(dir, 0, 1)
+			if err != nil || len(events) == 0 {
+				return who, false
+			}
+			who = pg.Agent{Tenant: events[0].Tenant, ID: events[0].Agent, Name: c.Name, Mode: c.Mode}
+		}
+		return who, true
+	}
+	logf := func(format string, args ...any) { fmt.Fprintf(out, format+"\n", args...) }
+	go func() {
+		defer store.Close()
+		pg.Ship(ctx, store, dir, identify, 5*time.Second, logf)
+	}()
+	return nil
+}
+
 func apiKey() string {
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 		return key
@@ -289,6 +327,14 @@ func check(ctx context.Context, out io.Writer, c config.Config, eng *agent.Engin
 		}
 	}
 	report(ex.TestOrder(ctx, binance.OrderRequest{Symbol: c.Symbols[0], Side: "BUY", QuoteQty: num.Int(10), ClientID: "check"}), "API key may place orders (test order, nothing traded)")
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		store, err := pg.Open(ctx, url)
+		if err == nil {
+			err = store.Ping(ctx)
+			store.Close()
+		}
+		report(err, "database reachable")
+	}
 	items, err := eng.News.Fetch(ctx, eng.Now(), 72*time.Hour, nil)
 	report(err, fmt.Sprintf("%d headlines from %d feeds", len(items), len(c.NewsFeeds)))
 	switch bot := eng.Bot; {

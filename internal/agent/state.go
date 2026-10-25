@@ -104,6 +104,8 @@ type ScoredCall struct {
 // State is the account's single source of truth, rewritten atomically.
 type State struct {
 	Version        string       `json:"schema_version"`
+	TenantID       string       `json:"tenant_id"`
+	AgentID        string       `json:"agent_id"`
 	Mode           string       `json:"mode"`
 	Name           string       `json:"name"`
 	Symbols        []string     `json:"symbols"`

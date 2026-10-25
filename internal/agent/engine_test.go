@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ismatsamadov/trader/internal/analyst"
+	"github.com/ismatsamadov/trader/internal/audit"
 	"github.com/ismatsamadov/trader/internal/binance"
 	"github.com/ismatsamadov/trader/internal/config"
 	"github.com/ismatsamadov/trader/internal/news"
@@ -818,5 +819,60 @@ func TestAccountIsValuedWhereOrdersFill(t *testing.T) {
 	}
 	if got := r.eng.st.Last().Prices["BTCUSDT"].Float(); got != live {
 		t.Fatalf("the model and the scorecard use the live market: %v vs %v", got, live)
+	}
+}
+
+func auditTypes(t *testing.T, c config.Config) ([]string, []audit.Event) {
+	t.Helper()
+	events, err := audit.ReadAfter(EventsDir(c), 0, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var types []string
+	for _, e := range events {
+		types = append(types, e.Type)
+	}
+	return types, events
+}
+
+func TestEveryStepIsOnRecordBeforeItHappens(t *testing.T) {
+	r := newRig(t, rate("strong_buy", "hold"))
+	r.tick()
+	types, events := auditTypes(t, r.eng.Config)
+	want := []string{evAccountCreated, evAgentStarted, evEquity, evDecisionStarted, evModelCall, evDecisionDone, evOrderIntent, evOrderResult, evTradeBooked}
+	if strings.Join(types, " ") != strings.Join(want, " ") {
+		t.Fatalf("events:\n got %v\nwant %v", types, want)
+	}
+	var intent orderIntent
+	json.Unmarshal(events[6].Body, &intent)
+	if o := r.ex.OrderList()[0]; intent.ClientID != o.ClientID || intent.Side != "BUY" {
+		t.Fatalf("the intent must name the order that was sent: %+v vs %+v", intent, o)
+	}
+	var started decisionStarted
+	json.Unmarshal(events[3].Body, &started)
+	if started.Briefing.DecisionID != "d1" || len(started.Briefing.Coins) != 2 || strings.Contains(string(events[3].Body), r.eng.Config.Model) {
+		t.Fatalf("the briefing is recorded, the model only by fingerprint: %s", events[3].Body[:200])
+	}
+	if _, err := audit.Verify(EventsDir(r.eng.Config)); err != nil {
+		t.Fatal(err)
+	}
+	// After a restart the chain continues.
+	r.eng = newEngine(t, r.eng.Config, r)
+	r.open()
+	r.command("status")
+	if last, err := audit.Verify(EventsDir(r.eng.Config)); err != nil || last.Type != evCommand {
+		t.Fatalf("chain after restart: %v %+v", err, last)
+	}
+}
+
+func TestNothingHappensThatCannotBeRecorded(t *testing.T) {
+	r := newRig(t, rate("strong_buy", "hold"))
+	dir := EventsDir(r.eng.Config)
+	r.eng.events.Close()
+	os.Chmod(dir, 0o500)
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	r.tick()
+	if r.api.Count() != 0 || len(r.ex.OrderList()) != 0 || !r.sent("Decision skipped") {
+		t.Fatalf("no model call or order may happen off the record: calls %d, orders %v", r.api.Count(), r.ex.OrderList())
 	}
 }

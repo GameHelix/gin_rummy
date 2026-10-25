@@ -52,6 +52,9 @@ func (e *Engine) startDecision(ctx context.Context, kind, trigger string) error 
 	if err != nil {
 		return err
 	}
+	if err := e.emit(evDecisionStarted, decisionStarted{Decision: id, Kind: kind, Trigger: trigger, Config: fingerprint(e.Config), Model: fingerprint(e.Config.Model), Briefing: in.Briefing}); err != nil {
+		return err
+	}
 	e.st.NextID++
 	e.st.NewsQueue = nil
 	if err := e.save(); err != nil {
@@ -74,7 +77,7 @@ func (e *Engine) startDecision(ctx context.Context, kind, trigger string) error 
 func (e *Engine) finish(ctx context.Context, r result) error {
 	e.job = nil
 	if r.err != nil {
-		e.failed(ctx, e.now(), r.err)
+		e.failed(ctx, e.now(), r.job.id, r.err)
 		return r.err
 	}
 	c, res := e.Config, r.res
@@ -108,6 +111,9 @@ func (e *Engine) finish(ctx context.Context, r result) error {
 		if plans, err = PlanOrders(c, e.rules, e.st.Ledger, e.prices, res.Signals); err != nil {
 			note = "No trades: " + err.Error()
 		}
+	}
+	if err := e.emit(evDecisionDone, decisionFinished{Decision: d.ID, Signals: d.Signals, Summary: d.Summary, Abstained: d.Abstained, CostUSD: d.CostUSD, Plans: plans, Note: note}); err != nil {
+		plans, note = nil, "No trades: the audit log could not be written."
 	}
 	e.notify(ctx, e.decisionText(d, plans, note))
 	var trades []Trade

@@ -60,16 +60,23 @@ func (e *Engine) send(ctx context.Context, id int, p Plan, force bool) (*Trade, 
 		e.st.Pending = e.st.Pending[:len(e.st.Pending)-1]
 		return nil, err
 	}
+	if err := e.emit(evOrderIntent, orderIntent{Decision: id, ClientID: clientID, Symbol: p.Symbol, Side: p.Side, Qty: p.Qty, QuoteQty: p.QuoteQty}); err != nil {
+		e.dropPending(clientID)
+		return nil, errors.Join(err, e.save())
+	}
 	o, err := e.Exchange.PlaceMarket(ctx, binance.OrderRequest{Symbol: p.Symbol, Side: p.Side, Quantity: p.Qty, QuoteQty: p.QuoteQty, ClientID: clientID})
 	if errors.Is(err, binance.ErrUnknown) {
+		e.emit(evOrderResult, orderResult{ClientID: clientID, Outcome: outcomeUnknown, Error: err.Error()})
 		e.alert(ctx, "order "+p.Symbol, fmt.Sprintf("⏳ %s %s: no clear answer from Binance. Checking the order before trading again.", verb(p.Side), coin))
 		return nil, err
 	}
 	if err != nil {
+		e.emit(evOrderResult, orderResult{ClientID: clientID, Outcome: outcomeRejected, Error: err.Error()})
 		e.dropPending(clientID)
 		e.alert(ctx, "order "+p.Symbol, fmt.Sprintf("⚠️ Binance rejected the order to %s %s: %s", strings.ToLower(p.Side), coin, untrusted(err.Error())))
 		return nil, errors.Join(err, e.save())
 	}
+	e.emit(evOrderResult, describeOrder(o, outcomeFilled))
 	t, err := e.book(ctx, id, o)
 	if err != nil {
 		// Executed but not yet booked: recover books it on a later pass.
@@ -81,6 +88,15 @@ func (e *Engine) send(ctx context.Context, id int, p Plan, force bool) (*Trade, 
 		e.notify(ctx, fmt.Sprintf("⚠️ The order to %s %s expired without filling; nothing was traded.", strings.ToLower(p.Side), coin))
 	}
 	return t, e.save()
+}
+
+// describeOrder describes an exchange order for the audit log; an order that
+// filled nothing is recorded as expired.
+func describeOrder(o binance.Order, outcome string) orderResult {
+	if o.ExecutedQty.Sign() <= 0 {
+		outcome = outcomeExpired
+	}
+	return orderResult{ClientID: o.ClientID, Outcome: outcome, OrderID: o.OrderID, Status: o.Status, ExecutedQty: o.ExecutedQty, QuoteQty: o.QuoteQty}
 }
 
 func verb(side string) string {
@@ -173,6 +189,7 @@ func (e *Engine) book(ctx context.Context, id int, o binance.Order) (*Trade, err
 	l.FeesUSD, l.OffBookFees = l.FeesUSD.Add(fee), l.OffBookFees.Add(feeOther)
 	t := Trade{Time: o.Time, Decision: id, Symbol: o.Symbol, Side: o.Side, Qty: o.ExecutedQty, QuoteQty: o.QuoteQty, Price: price, FeeUSD: fee, OrderID: o.OrderID, ClientID: o.ClientID}
 	e.st.Trades = keep(append(e.st.Trades, t), 1000)
+	e.emit(evTradeBooked, tradeBooked{Trade: t, Cash: l.Cash, Holding: l.Holdings[o.Symbol]})
 	e.checkLedger(ctx)
 	e.notify(ctx, e.tradeText(t))
 	return &t, nil
@@ -219,6 +236,7 @@ func (e *Engine) recover(ctx context.Context) {
 				still = append(still, p)
 				continue
 			}
+			e.emit(evOrderResult, orderResult{ClientID: p.ClientID, Outcome: outcomeMissing})
 			e.notify(ctx, fmt.Sprintf("⚠️ The order to %s %s never reached Binance; nothing was traded.", strings.ToLower(p.Side), coin))
 		case err != nil:
 			still = append(still, p)
@@ -226,6 +244,7 @@ func (e *Engine) recover(ctx context.Context) {
 		case !o.Final():
 			still = append(still, p)
 		default:
+			e.emit(evOrderResult, describeOrder(o, outcomeRecovered))
 			t, err := e.book(ctx, p.Decision, o)
 			switch {
 			case err != nil:

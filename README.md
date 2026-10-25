@@ -6,7 +6,7 @@ An AI crypto trading agent for Binance spot. It watches BTC and ETH around the c
 
 1. **Binance:** create an API key with spot trading on and withdrawals off, ideally restricted to your IP. For a trial run, use testnet keys from testnet.binance.vision.
 2. **Telegram:** create a bot with @BotFather and send it a message; `trader check` then prints your chat ID. Commands are only accepted from that private chat.
-3. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money.
+3. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money. `POSTGRES_PASSWORD` protects the database where the engine keeps a copy of its audit history.
 
 ```sh
 mkdir -p data                           # on Linux: sudo chown 65532 data
@@ -24,6 +24,7 @@ docker compose run --rm trader status
 - **Stops:** a 10% loss in a day pauses trading until 00:00 UTC. A 30% loss from the start sells everything and stops; after `/resume` both limits count from that moment. While you have stopped trading yourself, a big loss is reported but nothing is sold.
 - **Triggers:** a decision every 4 hours, plus up to 8 a day on 3% hourly moves or headlines matching alert keywords.
 - **Telegram:** `/status`, `/decide`, `/stop`, `/resume`, `/sellall`.
+- **Audit:** every step (the data shown to the model, each model call and its cost, ratings, orders, fills, stops, commands) is written to a hash-chained log in `data/<mode>/events` before it happens, then copied to Postgres.
 - **Safety:**
   - Each order is saved before it is sent. After an unclear reply it is looked up, never resent.
   - Keys that can withdraw are refused.

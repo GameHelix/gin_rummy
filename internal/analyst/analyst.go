@@ -41,6 +41,29 @@ type Analyst struct {
 	Budget *Budget
 	Log    io.Writer
 	Sleep  func(context.Context, time.Duration) error
+	// Observe, when set, receives every model call as it ends. It may run on
+	// the analysis goroutine.
+	Observe func(ModelCall)
+}
+
+// ModelCall is one model request and what it cost.
+type ModelCall struct {
+	Decision     string  `json:"decision"`
+	Purpose      string  `json:"purpose"`
+	Status       string  `json:"status"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CacheRead    int64   `json:"cache_read_tokens"`
+	CacheWrite   int64   `json:"cache_write_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+	Millis       int64   `json:"latency_ms"`
+	Error        string  `json:"error,omitempty"`
+}
+
+func (a *Analyst) observe(c ModelCall) {
+	if a.Observe != nil {
+		a.Observe(c)
+	}
 }
 
 // Briefing is the analyst's first message.
@@ -482,11 +505,16 @@ func (a *Analyst) call(ctx context.Context, in Input, params anthropic.BetaMessa
 		if err := a.Budget.Dispatch(ctx, att.ID); err != nil {
 			return nil, 0, err
 		}
+		started := time.Now()
 		resp, err := a.Client.Beta.Messages.New(ctx, params, option.WithMaxRetries(0))
+		call := ModelCall{Decision: in.Briefing.DecisionID, Purpose: purpose, Millis: time.Since(started).Milliseconds()}
 		persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		if err == nil {
 			cost := usageCost(c, resp)
 			u := resp.Usage
+			call.Status, call.CostUSD = attemptSettled, cost
+			call.InputTokens, call.OutputTokens, call.CacheRead, call.CacheWrite = u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens
+			a.observe(call)
 			settleErr := a.Budget.Settle(persist, att.ID, cost, u.InputTokens+u.CacheCreationInputTokens+u.CacheReadInputTokens, u.OutputTokens)
 			cancel()
 			if settleErr != nil {
@@ -510,6 +538,8 @@ func (a *Analyst) call(ctx context.Context, in Input, params anthropic.BetaMessa
 		case errors.As(err, &apiErr):
 			_ = a.Budget.Release(persist, att.ID, fmt.Sprintf("HTTP %d", apiErr.StatusCode))
 			cancel()
+			call.Status, call.Error = attemptReleased, fmt.Sprintf("HTTP %d", apiErr.StatusCode)
+			a.observe(call)
 			lastErr = fmt.Errorf("Anthropic API returned HTTP %d (%s)", apiErr.StatusCode, apiErr.Type())
 			if !retryableStatus(apiErr.StatusCode) {
 				return nil, 0, &PermanentError{lastErr}
@@ -518,10 +548,14 @@ func (a *Analyst) call(ctx context.Context, in Input, params anthropic.BetaMessa
 		case ctx.Err() != nil:
 			_ = a.Budget.Uncertain(persist, att.ID, "interrupted before a response arrived")
 			cancel()
+			call.Status, call.CostUSD, call.Error = attemptUncertain, reserve, "interrupted"
+			a.observe(call)
 			return nil, 0, ctx.Err()
 		case errors.As(err, &urlErr):
 			_ = a.Budget.Uncertain(persist, att.ID, "network failure; the provider may have processed the request")
 			cancel()
+			call.Status, call.CostUSD, call.Error = attemptUncertain, reserve, "network failure"
+			a.observe(call)
 			lastErr = fmt.Errorf("Anthropic API request failed: %w", err)
 			wait = retryDelay(nil, attempt)
 		default:
@@ -529,6 +563,8 @@ func (a *Analyst) call(ctx context.Context, in Input, params anthropic.BetaMessa
 			// may have been processed and billed, so keep the charge.
 			_ = a.Budget.Uncertain(persist, att.ID, "unexpected client error: "+err.Error())
 			cancel()
+			call.Status, call.CostUSD, call.Error = attemptUncertain, reserve, "unreadable response"
+			a.observe(call)
 			return nil, 0, &PermanentError{fmt.Errorf("unexpected Anthropic client error (reservation kept until resolved): %w", err)}
 		}
 		if attempt < maxAPIAttempts {
