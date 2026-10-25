@@ -35,10 +35,14 @@ type Engine struct {
 	Config   config.Config
 	Exchange *binance.Client
 	Analyst  *analyst.Analyst
-	News     news.Feeds
+	News     news.Source
 	Bot      *telegram.Bot
 	Now      func() time.Time
 	Log      io.Writer
+	// TenantID and AgentID name an agent the fleet manages; a standalone
+	// agent creates its own.
+	TenantID uuid.UUID
+	AgentID  uuid.UUID
 
 	st        State
 	events    *audit.Log
@@ -255,7 +259,10 @@ func (e *Engine) Init(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	now := e.now()
-	tenant, agent := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	tenant, agent := e.TenantID, e.AgentID
+	if tenant == uuid.Nil || agent == uuid.Nil {
+		tenant, agent = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	}
 	st := State{
 		Version: stateVersion, TenantID: tenant.String(), AgentID: agent.String(), Mode: c.Mode, Name: c.Name, Symbols: c.Symbols, CreatedAt: now, Nonce: nonce.Text(36),
 		Capital: capital, RiskBase: capital, TakerFee: e.feeRate(acct.Taker), Ledger: Ledger{Cash: capital, Holdings: map[string]num.Dec{}},
@@ -280,6 +287,12 @@ func EventsDir(c config.Config) string { return filepath.Join(c.Dir(), "events")
 func (e *Engine) openEvents() error {
 	if e.st.TenantID == "" || e.st.AgentID == "" {
 		e.st.TenantID, e.st.AgentID = uuid.Must(uuid.NewV7()).String(), uuid.Must(uuid.NewV7()).String()
+		if e.TenantID != uuid.Nil && e.AgentID != uuid.Nil {
+			e.st.TenantID, e.st.AgentID = e.TenantID.String(), e.AgentID.String()
+		}
+	}
+	if e.AgentID != uuid.Nil && (e.st.AgentID != e.AgentID.String() || e.st.TenantID != e.TenantID.String()) {
+		return fmt.Errorf("%s holds another agent's account", e.Config.Dir())
 	}
 	tenant, err := uuid.Parse(e.st.TenantID)
 	if err != nil {

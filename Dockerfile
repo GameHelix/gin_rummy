@@ -13,4 +13,4 @@ COPY --from=build /out/trader /app/trader
 COPY config ./config
 COPY --from=build --chown=nonroot:nonroot /out/data /app/data
 ENTRYPOINT ["/app/trader"]
-CMD ["run"]
+CMD ["serve"]

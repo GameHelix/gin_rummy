@@ -26,6 +26,7 @@ import (
 	"github.com/ismatsamadov/trader/internal/audit"
 	"github.com/ismatsamadov/trader/internal/binance"
 	"github.com/ismatsamadov/trader/internal/config"
+	"github.com/ismatsamadov/trader/internal/fleet"
 	"github.com/ismatsamadov/trader/internal/news"
 	"github.com/ismatsamadov/trader/internal/num"
 	"github.com/ismatsamadov/trader/internal/pg"
@@ -36,12 +37,24 @@ const usage = `trader — AI crypto trading agent for Binance spot
 
   trader check            check keys, permissions, balances, news and Telegram
   trader init             start the account with capital_usd from the config
-  trader run              trade around the clock (what Docker runs)
+  trader run              trade around the clock on its own, with keys from .env
   trader decide           make one decision now
   trader decide --dry-run show the live briefing; no model call, no trade
   trader status [--json]  equity, positions, last decision and AI spend
   trader budget status
   trader budget resolve --attempt ID --cost-usd N --note TEXT
+
+Multi-user engine (needs DATABASE_URL and ENGINE_MASTER_KEY):
+  trader serve            run every active agent (what Docker runs)
+  trader import           move this standalone agent into the database
+  trader tenant add --name NAME --plan FILE
+  trader tenant plan --tenant ID --plan FILE
+  trader key add --tenant ID --kind anthropic|binance|telegram [--label TEXT] < key.json
+  trader key list --tenant ID
+  trader key revoke --tenant ID --key ID
+  trader agent add --tenant ID --name NAME --mode testnet|live --config FILE --keys ID,ID
+  trader agent config|start|stop|status --tenant ID --agent ID [--config FILE]
+  trader agent list --tenant ID
 
 All commands take --config PATH (default config/agent.json).
 TRADER_MODE in .env picks testnet (default) or live.`
@@ -55,13 +68,14 @@ func main() {
 	}
 }
 
-// env holds what tests replace: endpoints and the clock.
+// env holds what tests replace: endpoints, the clock and standard input.
 type env struct {
 	HTTP        *http.Client
 	BinanceURL  string
 	APIURL      string
 	TelegramURL string
 	Now         func() time.Time
+	In          io.Reader
 }
 
 func run(ctx context.Context, args []string, out io.Writer, e env) error {
@@ -77,6 +91,12 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 	}
 	if e.Now == nil {
 		e.Now = time.Now
+	}
+	if e.In == nil {
+		e.In = os.Stdin
+	}
+	if fleetCommands[args[0]] {
+		return runFleet(ctx, args, out, e)
 	}
 	cmd, rest := args[0], args[1:]
 	if cmd == "budget" {
@@ -201,7 +221,31 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 	return nil
 }
 
+// build wires a standalone agent with the keys in .env.
 func build(c config.Config, e env, log io.Writer) (*agent.Engine, error) {
+	k, err := keysFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return buildEngine(c, k, e, news.Feeds{HTTP: e.HTTP, URLs: c.NewsFeeds}, log), nil
+}
+
+// keysFromEnv reads the standalone agent's keys from the environment.
+func keysFromEnv() (fleet.Keys, error) {
+	k := fleet.Keys{Anthropic: apiKey(), BinanceKey: os.Getenv("BINANCE_API_KEY"), BinanceSecret: os.Getenv("BINANCE_API_SECRET"), TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN")}
+	if id := os.Getenv("TELEGRAM_CHAT_ID"); id != "" {
+		chat, err := strconv.ParseInt(id, 10, 64)
+		if err != nil {
+			return k, errors.New("TELEGRAM_CHAT_ID must be a number")
+		}
+		k.TelegramChat = chat
+	}
+	return k, nil
+}
+
+// buildEngine wires an agent to Binance, the model and Telegram with the
+// given keys.
+func buildEngine(c config.Config, k fleet.Keys, e env, src news.Source, log io.Writer) *agent.Engine {
 	base, data := binance.TestnetURL, binance.DataURL
 	if c.Mode == config.Live {
 		base = binance.LiveURL
@@ -209,31 +253,24 @@ func build(c config.Config, e env, log io.Writer) (*agent.Engine, error) {
 	if e.BinanceURL != "" {
 		base, data = e.BinanceURL, e.BinanceURL
 	}
-	opts := []option.RequestOption{option.WithAPIKey(apiKey())}
+	opts := []option.RequestOption{option.WithAPIKey(k.Anthropic)}
 	if e.APIURL != "" {
 		opts = append(opts, option.WithBaseURL(e.APIURL))
 	}
 	eng := &agent.Engine{
 		Config:   c,
-		Exchange: &binance.Client{HTTP: exchangeClient(e.HTTP), BaseURL: base, DataURL: data, Key: os.Getenv("BINANCE_API_KEY"), Secret: os.Getenv("BINANCE_API_SECRET"), Now: e.Now},
+		Exchange: &binance.Client{HTTP: exchangeClient(e.HTTP), BaseURL: base, DataURL: data, Key: k.BinanceKey, Secret: k.BinanceSecret, Now: e.Now},
 		// One budget for testnet and live: both spend the same model key.
 		Analyst: &analyst.Analyst{Config: c, Client: anthropic.NewClient(opts...), Log: log,
 			Budget: &analyst.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: e.Now}},
-		News: news.Feeds{HTTP: e.HTTP, URLs: c.NewsFeeds},
+		News: src,
 		Now:  e.Now,
 		Log:  log,
 	}
-	if token := os.Getenv("TELEGRAM_BOT_TOKEN"); token != "" {
-		eng.Bot = &telegram.Bot{HTTP: &http.Client{Timeout: 90 * time.Second}, BaseURL: e.TelegramURL, Token: token}
-		if id := os.Getenv("TELEGRAM_CHAT_ID"); id != "" {
-			chat, err := strconv.ParseInt(id, 10, 64)
-			if err != nil {
-				return nil, errors.New("TELEGRAM_CHAT_ID must be a number")
-			}
-			eng.Bot.ChatID = chat
-		}
+	if k.TelegramToken != "" {
+		eng.Bot = &telegram.Bot{HTTP: &http.Client{Timeout: 90 * time.Second}, BaseURL: e.TelegramURL, Token: k.TelegramToken, ChatID: k.TelegramChat}
 	}
-	return eng, nil
+	return eng
 }
 
 // exchangeClient never follows redirects, so the API key header cannot be

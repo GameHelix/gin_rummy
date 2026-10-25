@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +11,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
-
-	"github.com/ismatsamadov/trader/internal/store"
 )
 
 // Config describes one trading agent. Every field except model and mode must
@@ -65,19 +65,13 @@ var namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$`)
 var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func LoadConfig(path string) (Config, error) {
-	var c Config
-	if err := store.ReadJSON(path, &c); err != nil {
-		return c, fmt.Errorf("configuration: %w", err)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("configuration: %w", err)
 	}
-	var present map[string]json.RawMessage
-	if err := store.ReadJSON(path, &present); err != nil {
-		return c, fmt.Errorf("configuration: %w", err)
-	}
-	t := reflect.TypeOf(c)
-	for i := 0; i < t.NumField(); i++ {
-		if key := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]; key != "model" && key != "-" && present[key] == nil {
-			return c, fmt.Errorf("configuration: missing %q", key)
-		}
+	c, err := Parse(raw, "model")
+	if err != nil {
+		return c, err
 	}
 	if m := strings.TrimSpace(os.Getenv("TRADER_MODEL")); m != "" {
 		c.Model = m
@@ -87,6 +81,29 @@ func LoadConfig(path string) (Config, error) {
 		c.Mode = Testnet
 	}
 	return c, c.Validate()
+}
+
+// Parse reads a config strictly: unknown fields are errors, and every field
+// must be present except those named optional. It does not validate values.
+func Parse(raw []byte, optional ...string) (Config, error) {
+	var c Config
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&c); err != nil {
+		return c, fmt.Errorf("configuration: %w", err)
+	}
+	var present map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &present); err != nil {
+		return c, fmt.Errorf("configuration: %w", err)
+	}
+	t := reflect.TypeOf(c)
+	for i := 0; i < t.NumField(); i++ {
+		key := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+		if key != "-" && !slices.Contains(optional, key) && present[key] == nil {
+			return c, fmt.Errorf("configuration: missing %q", key)
+		}
+	}
+	return c, nil
 }
 
 func (c Config) Validate() error {

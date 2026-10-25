@@ -31,9 +31,45 @@ type Item struct {
 	Coins       []string  `json:"coins,omitempty"`
 }
 
+// Source is anything that supplies headlines: the feeds themselves or a
+// cache several agents share.
+type Source interface {
+	Fetch(ctx context.Context, now time.Time, lookback time.Duration, coins []string) ([]Item, error)
+}
+
 type Feeds struct {
 	HTTP *http.Client
 	URLs []string
+}
+
+// Cache shares one fetch of the feeds among all agents for TTL, tagging
+// the items for each caller's coins.
+type Cache struct {
+	Feeds Feeds
+	TTL   time.Duration
+
+	mu    sync.Mutex
+	at    time.Time
+	items []Item
+}
+
+func (c *Cache) Fetch(ctx context.Context, now time.Time, lookback time.Duration, coins []string) ([]Item, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.items == nil || now.Sub(c.at) >= c.TTL || now.Before(c.at) {
+		items, err := c.Feeds.Fetch(ctx, now, 7*24*time.Hour, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.items, c.at = items, now
+	}
+	var out []Item
+	for _, it := range c.items {
+		if !it.PublishedAt.Before(now.Add(-lookback)) && !it.PublishedAt.After(now) {
+			out = append(out, it)
+		}
+	}
+	return Tag(out, coins), nil
 }
 
 // Fetch reads every feed at once and returns items published within lookback

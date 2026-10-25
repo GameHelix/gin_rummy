@@ -17,7 +17,7 @@ services:
   trader:
     build: .
     image: trader:local
-    command: ["run"]
+    command: ["serve"]
     env_file:
       - path: .env
         required: false

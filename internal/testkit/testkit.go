@@ -52,8 +52,12 @@ func At(t *testing.T, value string) time.Time {
 // them; market orders fill at the current price with a 0.1% fee taken from
 // the asset received. Every signed request must carry a valid signature.
 type Binance struct {
-	mu           sync.Mutex
-	Now          func() time.Time
+	mu  sync.Mutex
+	Now func() time.Time
+	// APIKey and APISecret are the credentials it accepts; Key and Secret
+	// unless set.
+	APIKey       string
+	APISecret    string
 	Balances     map[string]num.Dec
 	Orders       []Order
 	Restrictions map[string]any
@@ -198,7 +202,11 @@ var steps = map[string]num.Dec{"BTCUSDT": num.MustParse("0.00001"), "ETHUSDT": n
 func (b *Binance) serve(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if i := strings.LastIndex(r.URL.RawQuery, "&signature="); i >= 0 {
-		if r.Header.Get("X-MBX-APIKEY") != Key || binance.Sign(Secret, r.URL.RawQuery[:i]) != r.URL.RawQuery[i+len("&signature="):] {
+		key, secret := Key, Secret
+		if b.APIKey != "" {
+			key, secret = b.APIKey, b.APISecret
+		}
+		if r.Header.Get("X-MBX-APIKEY") != key || binance.Sign(secret, r.URL.RawQuery[:i]) != r.URL.RawQuery[i+len("&signature="):] {
 			apiError(w, 401, -1022, "Signature for this request is not valid.")
 			return
 		}
@@ -492,7 +500,9 @@ func NewsServer(t *testing.T, items func() []Headline) *httptest.Server {
 // API answers Messages API requests from Script and records them.
 // Status -1 drops the connection; -2 returns an undecodable body.
 type API struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// WantKey, when set, is the only API key the fake accepts.
+	WantKey  string
 	Requests []map[string]any
 	Bodies   []string
 	Headers  []http.Header
@@ -504,6 +514,12 @@ func (f *API) Server(t *testing.T) *httptest.Server {
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
 		json.Unmarshal(raw, &body)
+		if f.WantKey != "" && r.Header.Get("X-Api-Key") != f.WantKey {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(401)
+			w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`))
+			return
+		}
 		f.mu.Lock()
 		n := len(f.Requests)
 		f.Requests, f.Bodies, f.Headers = append(f.Requests, body), append(f.Bodies, string(raw)), append(f.Headers, r.Header.Clone())

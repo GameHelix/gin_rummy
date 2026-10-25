@@ -179,7 +179,7 @@ func (e *Engine) score(ctx context.Context, now time.Time) {
 // until a decision runs. The first read after a fresh start only marks what
 // is already out there as seen.
 func (e *Engine) readNews(ctx context.Context, now time.Time) {
-	if len(e.News.URLs) == 0 || now.Sub(e.newsAt) < 5*time.Minute {
+	if e.News == nil || now.Sub(e.newsAt) < 5*time.Minute {
 		return
 	}
 	e.newsAt = now
