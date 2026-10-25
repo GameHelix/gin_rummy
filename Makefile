@@ -2,7 +2,7 @@ GOCACHE ?= $(CURDIR)/.cache/go-build
 export GOCACHE
 CONFIG ?= config/agent.json
 
-.PHONY: test check build init dry-run run daemon status
+.PHONY: test check build verify init preview decide run status
 
 test:
 	go test -race ./...
@@ -14,17 +14,20 @@ check:
 build:
 	go build -o bin/trader ./cmd/trader
 
+verify:
+	go run ./cmd/trader check --config $(CONFIG)
+
 init:
 	go run ./cmd/trader init --config $(CONFIG)
 
-dry-run:
-	go run ./cmd/trader run --dry-run --config $(CONFIG)
+preview:
+	go run ./cmd/trader decide --dry-run --config $(CONFIG)
+
+decide:
+	go run ./cmd/trader decide --config $(CONFIG)
 
 run:
 	go run ./cmd/trader run --config $(CONFIG)
-
-daemon:
-	go run ./cmd/trader daemon --config $(CONFIG)
 
 status:
 	go run ./cmd/trader status --config $(CONFIG)

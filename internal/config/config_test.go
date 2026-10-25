@@ -11,6 +11,7 @@ import (
 func TestShippedConfigTakesTheModelFromTheEnvironment(t *testing.T) {
 	path := filepath.Join("..", "..", "config", "agent.json")
 	t.Setenv("TRADER_MODEL", "")
+	t.Setenv("TRADER_MODE", "")
 	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "TRADER_MODEL") {
 		t.Fatalf("a missing model must point to TRADER_MODEL: %v", err)
 	}
@@ -19,8 +20,16 @@ func TestShippedConfigTakesTheModelFromTheEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Model != "test-model" || c.RefusalFallback || c.MarketSymbol != "SPY" {
+	if c.Model != "test-model" || c.RefusalFallback || c.Mode != Testnet || c.Dir() != filepath.Join("data", "testnet") || c.Base("ETHUSDT") != "ETH" {
 		t.Fatalf("shipped defaults changed: %+v", c)
+	}
+	t.Setenv("TRADER_MODE", "LIVE")
+	if c, err := LoadConfig(path); err != nil || c.Mode != Live {
+		t.Fatalf("TRADER_MODE=live must select live: %v", err)
+	}
+	t.Setenv("TRADER_MODE", "real")
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("an unknown mode must be rejected")
 	}
 }
 
@@ -28,8 +37,13 @@ func TestConfigRejectsUnsafeOrUnknownSettings(t *testing.T) {
 	for name, edit := range map[string]func(*Config){
 		"output too large without streaming": func(c *Config) { c.MaxOutputTokens = 32000 },
 		"unknown effort":                     func(c *Config) { c.Effort = "extreme" },
-		"fractional cents":                   func(c *Config) { c.InitialCash = 10000.005 },
-		"duplicate symbol":                   func(c *Config) { c.Symbols = []string{"AAA", "AAA"} },
+		"pair in another quote":              func(c *Config) { c.Symbols = []string{"BTCEUR"} },
+		"duplicate symbol":                   func(c *Config) { c.Symbols = []string{"BTCUSDT", "BTCUSDT"} },
+		"position above exposure":            func(c *Config) { c.MaxPositionWeight = 0.95 },
+		"loss limit of 100%":                 func(c *Config) { c.MaxDrawdownPct = 100 },
+		"feed without scheme":                func(c *Config) { c.NewsFeeds = []string{"coindesk.com/rss"} },
+		"plain http feed":                    func(c *Config) { c.NewsFeeds = []string{"http://coindesk.com/rss"} },
+		"no mode":                            func(c *Config) { c.Mode = "" },
 		"no data dir":                        func(c *Config) { c.DataDir = " " },
 		"too many samples":                   func(c *Config) { c.Samples = 9 },
 	} {
@@ -51,7 +65,7 @@ func TestConfigRejectsUnsafeOrUnknownSettings(t *testing.T) {
 func TestEveryConfigKeyIsRequired(t *testing.T) {
 	t.Setenv("TRADER_MODEL", "test-model")
 	raw, _ := os.ReadFile(filepath.Join("..", "..", "config", "agent.json"))
-	for _, key := range []string{"commission", "slippage_bps", "rebalance_band", "refusal_fallback", "news_items"} {
+	for _, key := range []string{"capital_usd", "max_drawdown_pct", "rebalance_band", "refusal_fallback", "news_feeds"} {
 		var m map[string]any
 		json.Unmarshal(raw, &m)
 		delete(m, key)
@@ -80,16 +94,27 @@ func TestDotenvDoesNotEvaluateShellOrOverwriteEnvironment(t *testing.T) {
 	if err := LoadEnv(path); err == nil {
 		t.Fatal("malformed dotenv accepted")
 	}
+	os.WriteFile(path, []byte("TRADER_TEST_C=testnet\nTRADER_TEST_C=live\n"), 0o600)
+	if err := LoadEnv(path); err == nil || !strings.Contains(err.Error(), "TRADER_TEST_C is set twice") {
+		t.Fatalf("a duplicate key must be rejected, as Docker Compose would read the other one: %v", err)
+	}
+	os.Unsetenv("TRADER_TEST_D")
+	t.Cleanup(func() { os.Unsetenv("TRADER_TEST_D") })
+	os.WriteFile(path, []byte("TRADER_TEST_D=live # real money\n"), 0o600)
+	if err := LoadEnv(path); err != nil || os.Getenv("TRADER_TEST_D") != "live" {
+		t.Fatalf("inline comments must be dropped like Docker Compose does: %q %v", os.Getenv("TRADER_TEST_D"), err)
+	}
 }
 
 func testConfig(dir string) Config {
 	return Config{
-		Name: "test-agent", Symbols: []string{"AAA", "BBB"}, MarketSymbol: "MKT",
-		InitialCash: 10000, Commission: 1, SlippageBPS: 5,
-		MaxPositionWeight: 0.4, MaxInvestedWeight: 0.8, RebalanceBand: 0.03, MinTradeUSD: 50,
-		HorizonSessions: 2, CloseBufferMinutes: 30,
-		Model: "test-model", Effort: "high", MaxOutputTokens: 4000, MaxTurns: 6, Samples: 1, NewsItems: 5,
+		Name: "test-agent", Symbols: []string{"BTCUSDT", "ETHUSDT"}, QuoteAsset: "USDT", CapitalUSD: 100,
+		MaxPositionWeight: 0.45, MaxInvestedWeight: 0.9, RebalanceBand: 0.05, MinTradeUSD: 10,
+		DecisionIntervalHours: 4, MoveTrigger1HPct: 3, MoveTriggerSinceDecisionPct: 5, EventCooldownMinutes: 60, PollSeconds: 30,
+		NewsFeeds: []string{"https://example.com/rss"}, NewsAlertKeywords: []string{"etf"}, MaxEventDecisionsPerDay: 8, NewsItems: 5, ScoreHorizonHours: 24,
+		DailyLossLimitPct: 10, MaxDrawdownPct: 30,
+		Model: "test-model", Effort: "high", MaxOutputTokens: 4000, MaxTurns: 6, Samples: 1,
 		RefusalFallback: true, InputUSDPerMillion: 4, OutputUSDPerMillion: 20, CacheWriteUSDPerMillion: 5, CacheReadUSDPerMillion: 0.2,
-		MaxDailyLLMUSD: 5, MaxMonthlyLLMUSD: 50, DataDir: dir,
+		MaxDailyLLMUSD: 5, MaxMonthlyLLMUSD: 50, DataDir: dir, Mode: Testnet,
 	}
 }

@@ -2,11 +2,14 @@ services:
   trader:
     build: .
     image: trader:local
-    command: ["daemon"]
+    command: ["run"]
     env_file:
       - path: .env
         required: false
     volumes:
       - ./data:/app/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     stop_grace_period: 30s

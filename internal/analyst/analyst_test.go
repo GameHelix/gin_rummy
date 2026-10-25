@@ -15,65 +15,71 @@ import (
 
 	"github.com/ismatsamadov/trader/internal/config"
 	"github.com/ismatsamadov/trader/internal/market"
+	"github.com/ismatsamadov/trader/internal/news"
 	"github.com/ismatsamadov/trader/internal/testkit"
-
-	"net/http"
 )
 
-func analystInput(t *testing.T, c config.Config, m *testkit.Market, dir string) AnalystInput {
-	t.Helper()
-	bars := map[string][]market.Bar{}
-	b := Briefing{Session: "2026-10-23", DecisionTime: "2026-10-23T17:00:00-04:00", HorizonSessions: c.HorizonSessions}
-	for _, sym := range c.AllSymbols() {
-		var series []market.Bar
-		for _, bar := range m.Bars[sym] {
-			if bar.Date <= "2026-10-23" {
-				series = append(series, bar)
-			}
-		}
-		bars[sym] = series
+var decisionTime = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+
+func candles(step time.Duration, n int, price float64) []market.Candle {
+	out := make([]market.Candle, n)
+	for i := range out {
+		open := decisionTime.Truncate(step).Add(-time.Duration(n-1-i) * step)
+		p := price * (1 + 0.01*math.Sin(float64(i)/7))
+		out[i] = market.Candle{Open: open, O: p, H: p * 1.005, L: p * 0.995, C: p, Volume: 10, QuoteVolume: 10 * p, CloseTime: open.Add(step - time.Millisecond)}
 	}
-	for _, sym := range c.Symbols {
-		ind, err := market.ComputeIndicators(sym, "prices:"+sym, bars[sym])
+	return out
+}
+
+// analystInput puts one headline in the briefing and a second one behind get_news.
+func analystInput(t *testing.T, c config.Config, dir string) Input {
+	t.Helper()
+	in := Input{Candles: map[string]map[string][]market.Candle{}, Dir: dir}
+	in.News = []news.Item{
+		{ID: "news:aaaaaaaaaaaa", Source: "example.com", Title: "Bitcoin ETF inflows climb", Coins: []string{"BTC"}, PublishedAt: decisionTime.Add(-time.Hour)},
+		{ID: "news:bbbbbbbbbbbb", Source: "example.com", Title: "Ether upgrade date set", Coins: []string{"ETH"}, PublishedAt: decisionTime.Add(-2 * time.Hour)},
+	}
+	b := Briefing{DecisionID: "d1", DecisionTime: decisionTime.Format(time.RFC3339), Trigger: "scheduled", HorizonHours: c.ScoreHorizonHours,
+		Account: Account{EquityUSD: 100, CashWeight: 1}, Headlines: in.News[:1]}
+	for i, s := range c.Symbols {
+		price := []float64{80000, 2400}[i]
+		in.Candles[s] = map[string][]market.Candle{"1h": candles(time.Hour, 200, price), "4h": candles(4*time.Hour, 200, price), "1d": candles(24*time.Hour, 365, price)}
+		v, err := market.NewView(s, PriceEvidenceID(s), price, market.Closed(in.Candles[s]["1h"], decisionTime), market.Closed(in.Candles[s]["1d"], decisionTime))
 		if err != nil {
 			t.Fatal(err)
 		}
-		b.Universe = append(b.Universe, ind)
+		b.Coins = append(b.Coins, v)
 	}
-	ind, _ := market.ComputeIndicators(c.MarketSymbol, "market:"+c.MarketSymbol, bars[c.MarketSymbol])
-	b.Market = &ind
-	return AnalystInput{Briefing: b, Bars: bars, Cutoff: testkit.At(t, "2026-10-23 17:00"), Dir: dir}
+	in.Briefing = b
+	return in
 }
 
 func TestAnalystUsesToolsStrictSchemaAndCitedNews(t *testing.T) {
 	dir := t.TempDir()
 	c := testkit.Config(dir)
-	m := testkit.NewMarket(t, []string{"AAA", "BBB", "MKT"}, "2026-01-02", "2026-10-30")
-	news := testkit.NewsServer(t, testkit.At(t, "2026-10-23 12:00"))
 	api := &testkit.API{Script: []func(string) (int, any){
 		func(string) (int, any) {
 			return 200, testkit.Message("tool_use", testkit.Thinking(),
-				testkit.ToolUse("toolu_1", "get_news", map[string]any{"symbol": "AAA"}),
-				testkit.ToolUse("toolu_2", "get_price_history", map[string]any{"symbol": "BBB", "sessions": 3}))
+				testkit.ToolUse("toolu_1", "get_news", map[string]any{"topic": "ETH"}),
+				testkit.ToolUse("toolu_2", "get_price_history", map[string]any{"symbol": "BTCUSDT", "interval": "4h", "bars": 3}))
 		},
-		testkit.SubmitStep(map[string]string{"AAA": "strong_buy", "BBB": "hold"}, func(req, sym string) []string {
-			if sym == "AAA" {
-				return []string{"prices:AAA", testkit.NewsID.FindString(req)}
+		testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, func(req, sym string) []string {
+			if sym == "ETHUSDT" {
+				return []string{"prices:ETHUSDT", "news:bbbbbbbbbbbb"}
 			}
-			return []string{"prices:BBB", "market:MKT"}
+			return []string{"prices:BTCUSDT", "news:aaaaaaaaaaaa"}
 		}),
 	}}
-	srv := api.Server(t)
-	a := newTestAnalyst(t, c, srv.URL, news.URL)
-	res, err := a.Analyze(context.Background(), analystInput(t, c, m, dir))
+	a := newTestAnalyst(t, c, api.Server(t).URL)
+	res, err := a.Analyze(context.Background(), analystInput(t, c, dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Abstained || res.Signals["AAA"].Rating != RatingStrongBuy || res.Signals["BBB"].Rating != RatingHold {
+	if res.Abstained || res.Signals["BTCUSDT"].Rating != RatingStrongBuy || res.Signals["ETHUSDT"].Rating != RatingHold {
 		t.Fatalf("unexpected signals: %+v", res)
 	}
-	if len(res.Samples[0].News) != 1 || !strings.HasPrefix(res.Signals["AAA"].Evidence[1], "news:") {
-		t.Fatalf("news evidence was not recorded: %+v", res.Samples[0])
+	if res.Signals["ETHUSDT"].Evidence[1] != "news:bbbbbbbbbbbb" {
+		t.Fatalf("a headline returned by get_news must be citable: %+v", res.Signals)
 	}
 	first := api.Requests[0]
 	if tc := first["tool_choice"].(map[string]any); tc["type"] != "auto" {
@@ -99,8 +105,8 @@ func TestAnalystUsesToolsStrictSchemaAndCitedNews(t *testing.T) {
 	if !strings.Contains(second, `"tool_use_id":"toolu_1"`) || !strings.Contains(second, `"tool_use_id":"toolu_2"`) || !strings.Contains(second, `"signature":"sig-test"`) {
 		t.Fatal("tool results or the thinking block were not passed back in the follow-up turn")
 	}
-	if !strings.Contains(second, "untrusted third-party text") {
-		t.Fatal("news results must be labelled as untrusted data")
+	if !strings.Contains(second, "untrusted third-party text") || !strings.Contains(second, "Ether upgrade date set") || !strings.Contains(second, `\"interval\":\"4h\"`) {
+		t.Fatal("tool results must carry the requested data and label news as untrusted")
 	}
 	sum, _ := a.Budget.Summary(context.Background())
 	if sum.MonthCalls != 2 || sum.UnresolvedUSD != 0 || sum.TodayUSD <= 0 {
@@ -119,14 +125,13 @@ func TestAnalystUsesToolsStrictSchemaAndCitedNews(t *testing.T) {
 func TestInventedEvidenceIsRejectedAndCorrected(t *testing.T) {
 	dir := t.TempDir()
 	c := testkit.Config(dir)
-	m := testkit.NewMarket(t, []string{"AAA", "BBB", "MKT"}, "2026-01-02", "2026-10-30")
 	api := &testkit.API{Script: []func(string) (int, any){
-		testkit.SubmitStep(map[string]string{"AAA": "buy", "BBB": "sell"}, func(_, sym string) []string { return []string{"news:000000000000"} }),
-		testkit.SubmitStep(map[string]string{"AAA": "buy", "BBB": "sell"}, testkit.CitePrices),
+		testkit.SubmitStep(map[string]string{"BTCUSDT": "buy", "ETHUSDT": "sell"}, func(_, sym string) []string { return []string{"news:000000000000"} }),
+		testkit.SubmitStep(map[string]string{"BTCUSDT": "buy", "ETHUSDT": "sell"}, testkit.CitePrices),
 	}}
-	a := newTestAnalyst(t, c, api.Server(t).URL, "")
-	res, err := a.Analyze(context.Background(), analystInput(t, c, m, dir))
-	if err != nil || res.Signals["BBB"].Rating != RatingSell {
+	a := newTestAnalyst(t, c, api.Server(t).URL)
+	res, err := a.Analyze(context.Background(), analystInput(t, c, dir))
+	if err != nil || res.Signals["ETHUSDT"].Rating != RatingSell {
 		t.Fatalf("correction not accepted: %+v %v", res, err)
 	}
 	if !strings.Contains(api.Bodies[1], `"is_error":true`) || !strings.Contains(api.Bodies[1], "was not provided to you") {
@@ -135,26 +140,40 @@ func TestInventedEvidenceIsRejectedAndCorrected(t *testing.T) {
 }
 
 func TestMiscopiedEvidenceGetsASuggestion(t *testing.T) {
-	// The first live cycle cited news:f75d3bc590a2 for news:f56d3bc590a2.
-	shown := map[string]bool{"prices:AAA": true, "news:f56d3bc590a2": true, "market:MKT": true}
-	raw := `{"summary":"s","signals":{"AAA":{"rating":"buy","confidence":"low","rationale":"r","evidence_ids":["news:f75d3bc590a2"]}}}`
-	_, _, err := parseSubmission(raw, []string{"AAA"}, shown)
+	shown := map[string]bool{"prices:BTCUSDT": true, "news:f56d3bc590a2": true}
+	raw := `{"summary":"s","signals":{"BTCUSDT":{"rating":"buy","confidence":"low","rationale":"r","evidence_ids":["news:f75d3bc590a2"]}}}`
+	_, _, err := parseSubmission(raw, []string{"BTCUSDT"}, shown)
 	if err == nil || !strings.Contains(err.Error(), `did you mean "news:f56d3bc590a2"`) {
 		t.Fatalf("expected a suggestion, got %v", err)
 	}
 	raw = strings.Replace(raw, "news:f75d3bc590a2", "news:zzzzzzzzzzzz", 1)
-	if _, _, err := parseSubmission(raw, []string{"AAA"}, shown); err == nil || strings.Contains(err.Error(), "did you mean") {
+	if _, _, err := parseSubmission(raw, []string{"BTCUSDT"}, shown); err == nil || strings.Contains(err.Error(), "did you mean") {
 		t.Fatalf("an unrelated ID must not get a misleading suggestion: %v", err)
 	}
 }
 
-func TestPriceHistoryCitesTheSameIDAsTheBriefing(t *testing.T) {
+func TestPriceHistoryServesTheRequestedInterval(t *testing.T) {
 	c := testkit.Config("unused")
-	bars := map[string][]market.Bar{"AAA": {{Date: "2026-10-23", Close: 1}}, "MKT": {{Date: "2026-10-23", Close: 1}}}
-	for symbol, want := range map[string]string{"AAA": `"evidence_id":"prices:AAA"`, "MKT": `"evidence_id":"market:MKT"`} {
-		out, err := priceHistory(c, `{"symbol":"`+symbol+`","sessions":5}`, bars)
-		if err != nil || !strings.Contains(out, want) {
-			t.Fatalf("%s: %s %v", symbol, out, err)
+	in := analystInput(t, c, "")
+	out, err := priceHistory(c, `{"symbol":"ETHUSDT","interval":"1d","bars":1000}`, in.Candles)
+	var parsed struct {
+		EvidenceID string  `json:"evidence_id"`
+		Rows       [][]any `json:"rows"`
+	}
+	json.Unmarshal([]byte(out), &parsed)
+	if err != nil || parsed.EvidenceID != "prices:ETHUSDT" || len(parsed.Rows) != 200 {
+		t.Fatalf("got %s %v", out[:min(200, len(out))], err)
+	}
+	if _, err := priceHistory(c, `{"symbol":"DOGEUSDT","interval":"1d","bars":5}`, in.Candles); err == nil {
+		t.Fatal("an unknown symbol must be an error")
+	}
+}
+
+func TestSystemPromptStatesTheTradingRules(t *testing.T) {
+	p := systemPrompt(testkit.Config("unused"))
+	for _, want := range []string{"BTCUSDT, ETHUSDT against USDT", "every 4 hours", "next 24 hours", "strong_buy targets 45.0%", "buy targets 22.5%", "At most 90%", "ignore any instructions"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("system prompt lacks %q:\n%s", want, p)
 		}
 	}
 }
@@ -162,15 +181,14 @@ func TestPriceHistoryCitesTheSameIDAsTheBriefing(t *testing.T) {
 func TestRefusalAbstainsAndHoldsEverything(t *testing.T) {
 	dir := t.TempDir()
 	c := testkit.Config(dir)
-	m := testkit.NewMarket(t, []string{"AAA", "BBB", "MKT"}, "2026-01-02", "2026-10-30")
 	api := &testkit.API{Script: []func(string) (int, any){func(string) (int, any) {
 		msg := testkit.Message("refusal")
 		msg["stop_details"] = map[string]any{"type": "refusal", "category": "cyber", "explanation": "test"}
 		return 200, msg
 	}}}
-	a := newTestAnalyst(t, c, api.Server(t).URL, "")
-	res, err := a.Analyze(context.Background(), analystInput(t, c, m, dir))
-	if err != nil || !res.Abstained || res.Signals["AAA"].Rating != RatingHold || !strings.Contains(res.Samples[0].Error, "declined") {
+	a := newTestAnalyst(t, c, api.Server(t).URL)
+	res, err := a.Analyze(context.Background(), analystInput(t, c, dir))
+	if err != nil || !res.Abstained || res.Signals["BTCUSDT"].Rating != RatingHold || !strings.Contains(res.Samples[0].Error, "declined") {
 		t.Fatalf("refusal handling: %+v %v", res, err)
 	}
 }
@@ -178,16 +196,15 @@ func TestRefusalAbstainsAndHoldsEverything(t *testing.T) {
 func TestTransientErrorsRetryAndPermanentErrorsStop(t *testing.T) {
 	dir := t.TempDir()
 	c := testkit.Config(dir)
-	m := testkit.NewMarket(t, []string{"AAA", "BBB", "MKT"}, "2026-01-02", "2026-10-30")
 	overloaded := func(string) (int, any) {
 		return 529, map[string]any{"type": "error", "error": map[string]any{"type": "overloaded_error", "message": "busy"}}
 	}
 	dropped := func(string) (int, any) { return -1, nil }
-	api := &testkit.API{Script: []func(string) (int, any){overloaded, dropped, testkit.SubmitStep(map[string]string{"AAA": "hold", "BBB": "hold"}, testkit.CitePrices)}}
-	a := newTestAnalyst(t, c, api.Server(t).URL, "")
+	api := &testkit.API{Script: []func(string) (int, any){overloaded, dropped, testkit.SubmitStep(map[string]string{"BTCUSDT": "hold", "ETHUSDT": "hold"}, testkit.CitePrices)}}
+	a := newTestAnalyst(t, c, api.Server(t).URL)
 	var waits []time.Duration
 	a.Sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
-	if _, err := a.Analyze(context.Background(), analystInput(t, c, m, dir)); err != nil {
+	if _, err := a.Analyze(context.Background(), analystInput(t, c, dir)); err != nil {
 		t.Fatal(err)
 	}
 	if len(waits) != 2 {
@@ -204,8 +221,8 @@ func TestTransientErrorsRetryAndPermanentErrorsStop(t *testing.T) {
 	bad := &testkit.API{Script: []func(string) (int, any){func(string) (int, any) {
 		return 400, map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": "bad"}}
 	}}}
-	a2 := newTestAnalyst(t, c2, bad.Server(t).URL, "")
-	_, err := a2.Analyze(context.Background(), analystInput(t, c2, m, dir2))
+	a2 := newTestAnalyst(t, c2, bad.Server(t).URL)
+	_, err := a2.Analyze(context.Background(), analystInput(t, c2, dir2))
 	var perm *PermanentError
 	if !errors.As(err, &perm) || bad.Count() != 1 {
 		t.Fatalf("a 400 must stop immediately without retries: %v (%d calls)", err, bad.Count())
@@ -218,10 +235,9 @@ func TestTransientErrorsRetryAndPermanentErrorsStop(t *testing.T) {
 func TestUndecodableResponseStaysChargedAndStops(t *testing.T) {
 	dir := t.TempDir()
 	c := testkit.Config(dir)
-	m := testkit.NewMarket(t, []string{"AAA", "BBB", "MKT"}, "2026-01-02", "2026-10-30")
 	api := &testkit.API{Script: []func(string) (int, any){func(string) (int, any) { return -2, nil }}}
-	a := newTestAnalyst(t, c, api.Server(t).URL, "")
-	_, err := a.Analyze(context.Background(), analystInput(t, c, m, dir))
+	a := newTestAnalyst(t, c, api.Server(t).URL)
+	_, err := a.Analyze(context.Background(), analystInput(t, c, dir))
 	var perm *PermanentError
 	if !errors.As(err, &perm) || api.Count() != 1 {
 		t.Fatalf("an unexplained client failure must stop, not retry: %v", err)
@@ -252,43 +268,32 @@ func TestBudgetCapStopsBeforeCalling(t *testing.T) {
 	dir := t.TempDir()
 	c := testkit.Config(dir)
 	c.MaxDailyLLMUSD = 0.01
-	m := testkit.NewMarket(t, []string{"AAA", "BBB", "MKT"}, "2026-01-02", "2026-10-30")
 	api := &testkit.API{}
-	a := newTestAnalyst(t, c, api.Server(t).URL, "")
-	if _, err := a.Analyze(context.Background(), analystInput(t, c, m, dir)); !errors.Is(err, ErrBudgetExceeded) || api.Count() != 0 {
+	a := newTestAnalyst(t, c, api.Server(t).URL)
+	if _, err := a.Analyze(context.Background(), analystInput(t, c, dir)); !errors.Is(err, ErrBudgetExceeded) || api.Count() != 0 {
 		t.Fatalf("expected budget stop with no request, got %v after %d calls", err, api.Count())
 	}
 }
 
-func TestSamplesAggregateByMedianAndCompletedSamplesAreReused(t *testing.T) {
+func TestSamplesAggregateByMedian(t *testing.T) {
 	dir := t.TempDir()
 	c := testkit.Config(dir)
 	c.Samples = 3
-	m := testkit.NewMarket(t, []string{"AAA", "BBB", "MKT"}, "2026-01-02", "2026-10-30")
 	api := &testkit.API{Script: []func(string) (int, any){
-		testkit.SubmitStep(map[string]string{"AAA": "buy", "BBB": "sell"}, testkit.CitePrices),
-		testkit.SubmitStep(map[string]string{"AAA": "strong_buy", "BBB": "hold"}, testkit.CitePrices),
-		testkit.SubmitStep(map[string]string{"AAA": "hold", "BBB": "strong_sell"}, testkit.CitePrices),
+		testkit.SubmitStep(map[string]string{"BTCUSDT": "buy", "ETHUSDT": "sell"}, testkit.CitePrices),
+		testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, testkit.CitePrices),
+		testkit.SubmitStep(map[string]string{"BTCUSDT": "hold", "ETHUSDT": "strong_sell"}, testkit.CitePrices),
 	}}
-	a := newTestAnalyst(t, c, api.Server(t).URL, "")
-	in := analystInput(t, c, m, dir)
-	res, err := a.Analyze(context.Background(), in)
-	if err != nil || res.Signals["AAA"].Rating != RatingBuy || res.Signals["BBB"].Rating != RatingSell {
+	a := newTestAnalyst(t, c, api.Server(t).URL)
+	res, err := a.Analyze(context.Background(), analystInput(t, c, dir))
+	if err != nil || res.Signals["BTCUSDT"].Rating != RatingBuy || res.Signals["ETHUSDT"].Rating != RatingSell {
 		t.Fatalf("median aggregation: %+v %v", res.Signals, err)
 	}
-	if res.Signals["AAA"].Agreement < 0.33 || res.Signals["AAA"].Agreement > 0.34 {
-		t.Fatalf("agreement: %v", res.Signals["AAA"].Agreement)
+	if a := res.Signals["BTCUSDT"].Agreement; a < 0.33 || a > 0.34 {
+		t.Fatalf("agreement: %v", a)
 	}
-	again, err := a.Analyze(context.Background(), in)
-	if err != nil || api.Count() != 3 || again.Signals["AAA"].Rating != RatingBuy {
-		t.Fatalf("a retried cycle must reuse completed samples: %d calls, %v", api.Count(), err)
-	}
-	if again.CostUSD != res.CostUSD || res.CostUSD == 0 {
-		t.Fatalf("reused samples must keep their cost: %v vs %v", again.CostUSD, res.CostUSD)
-	}
-	a.Config.HorizonSessions = 60
-	if _, err := a.Analyze(context.Background(), in); err != nil || api.Count() != 6 {
-		t.Fatalf("samples made for a different task must not be reused: %d calls, %v", api.Count(), err)
+	if _, err := os.Stat(filepath.Join(dir, "sample-3.json")); err != nil || res.CostUSD == 0 {
+		t.Fatalf("samples must be saved with their cost: %v %v", err, res.CostUSD)
 	}
 }
 
@@ -297,12 +302,12 @@ func TestEvenVotesNeverInventARating(t *testing.T) {
 		{RatingBuy, RatingSell, RatingHold}, {RatingHold, RatingStrongBuy, RatingHold}, {RatingBuy, RatingStrongBuy, RatingBuy},
 		{RatingStrongSell, RatingSell, RatingSell}, {RatingStrongSell, RatingHold, RatingHold}, {RatingStrongBuy, RatingStrongSell, RatingHold},
 	} {
-		samples := []map[string]Signal{{"AAA": {Rating: tc.a, Evidence: []string{"x"}}}, {"AAA": {Rating: tc.b, Evidence: []string{"y"}}}}
-		got := Aggregate([]string{"AAA", "BBB"}, samples)
-		if got["AAA"].Rating != tc.want || got["BBB"].Rating != RatingHold {
-			t.Fatalf("%s + %s: got %s", tc.a, tc.b, got["AAA"].Rating)
+		samples := []map[string]Signal{{"BTCUSDT": {Rating: tc.a, Evidence: []string{"x"}}}, {"BTCUSDT": {Rating: tc.b, Evidence: []string{"y"}}}}
+		got := Aggregate([]string{"BTCUSDT", "ETHUSDT"}, samples)
+		if got["BTCUSDT"].Rating != tc.want || got["ETHUSDT"].Rating != RatingHold {
+			t.Fatalf("%s + %s: got %s", tc.a, tc.b, got["BTCUSDT"].Rating)
 		}
-		if got["AAA"].Rating != RatingHold && len(got["AAA"].Evidence) == 0 {
+		if got["BTCUSDT"].Rating != RatingHold && len(got["BTCUSDT"].Evidence) == 0 {
 			t.Fatalf("%s + %s: a trading rating must keep its evidence", tc.a, tc.b)
 		}
 	}
@@ -339,10 +344,10 @@ func TestReservationCoversTheWorstCase(t *testing.T) {
 	}
 }
 
-func newTestAnalyst(t *testing.T, c config.Config, apiURL, newsURL string) *Analyst {
+func newTestAnalyst(t *testing.T, c config.Config, apiURL string) *Analyst {
 	t.Helper()
 	return &Analyst{
-		Config: c, Client: testkit.Client(apiURL), News: market.NewsSource{HTTP: http.DefaultClient, BaseURL: newsURL},
+		Config: c, Client: testkit.Client(apiURL),
 		Budget: &Budget{Path: c.DataDir + "/budget.json", DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD},
 		Sleep:  func(context.Context, time.Duration) error { return nil },
 	}

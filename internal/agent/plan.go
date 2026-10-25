@@ -1,0 +1,103 @@
+package agent
+
+import (
+	"errors"
+	"math"
+
+	"github.com/ismatsamadov/trader/internal/analyst"
+	"github.com/ismatsamadov/trader/internal/binance"
+	"github.com/ismatsamadov/trader/internal/config"
+	"github.com/ismatsamadov/trader/internal/num"
+)
+
+// Plan is one market order: a SELL of Qty coins or a BUY spending QuoteQty.
+type Plan struct {
+	Symbol   string  `json:"symbol"`
+	Side     string  `json:"side"`
+	Qty      num.Dec `json:"qty"`
+	QuoteQty num.Dec `json:"quote_qty"`
+	Current  float64 `json:"current_weight"`
+	Target   float64 `json:"target_weight"`
+}
+
+// TargetWeight maps a rating to a share of equity. Hold keeps the position
+// unless it has grown past the cap.
+func TargetWeight(c config.Config, r analyst.Rating, current float64) float64 {
+	switch r {
+	case analyst.RatingStrongBuy:
+		return c.MaxPositionWeight
+	case analyst.RatingBuy:
+		return c.MaxPositionWeight / 2
+	case analyst.RatingSell, analyst.RatingStrongSell:
+		return 0
+	}
+	if current > c.MaxPositionWeight+c.RebalanceBand {
+		return c.MaxPositionWeight
+	}
+	return current
+}
+
+var cent = num.MustParse("0.01")
+
+// PlanOrders turns ratings into orders that respect the exposure cap, the
+// rebalance band, the minimum trade and the exchange's lot and notional
+// rules. Buys never spend more than the ledger's cash.
+func PlanOrders(c config.Config, rules map[string]binance.Symbol, l Ledger, prices map[string]num.Dec, signals map[string]analyst.Signal) ([]Plan, error) {
+	equity, err := l.Equity(prices)
+	if err != nil {
+		return nil, err
+	}
+	eq := equity.Float()
+	if eq <= 0 {
+		return nil, errors.New("no equity to trade")
+	}
+	current, target := map[string]float64{}, map[string]float64{}
+	var total float64
+	for _, s := range c.Symbols {
+		if prices[s].Sign() <= 0 {
+			return nil, errors.New("no price for " + s)
+		}
+		current[s] = l.Holdings[s].Mul(prices[s]).Float() / eq
+		target[s] = TargetWeight(c, signals[s].Rating, current[s])
+		total += target[s]
+	}
+	if total > c.MaxInvestedWeight {
+		for s := range target {
+			target[s] *= c.MaxInvestedWeight / total
+		}
+	}
+	cash := l.Cash
+	var plans []Plan
+	for _, s := range c.Symbols {
+		r, price, diff := rules[s], prices[s], target[s]-current[s]
+		usd, _ := num.FromFloat(math.Abs(diff) * eq)
+		p := Plan{Symbol: s, Current: round(current[s], 4), Target: round(target[s], 4)}
+		switch {
+		case diff < 0 && target[s] == 0:
+			p.Side, p.Qty = "SELL", l.Holdings[s].Floor(r.StepSize)
+		case diff < 0 && -diff >= c.RebalanceBand && usd.Float() >= c.MinTradeUSD:
+			p.Side, p.Qty = "SELL", num.Min(usd.Div(price), l.Holdings[s]).Floor(r.StepSize)
+		case diff > 0 && diff >= c.RebalanceBand && usd.Float() >= c.MinTradeUSD:
+			p.Side, p.QuoteQty = "BUY", num.Min(usd, cash).Floor(cent)
+		default:
+			continue
+		}
+		value := p.QuoteQty
+		if p.Side == "SELL" {
+			value = p.Qty.Mul(price)
+		}
+		if value.Sign() <= 0 || value.Less(r.MinNotional) || (p.Side == "BUY" && value.Float() < c.MinTradeUSD) {
+			continue
+		}
+		if p.Side == "BUY" {
+			cash = cash.Sub(p.QuoteQty)
+		}
+		plans = append(plans, p)
+	}
+	return plans, nil
+}
+
+func round(v float64, places int) float64 {
+	p := math.Pow(10, float64(places))
+	return math.Round(v*p) / p
+}

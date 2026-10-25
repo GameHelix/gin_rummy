@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,22 +22,26 @@ import (
 
 	"github.com/ismatsamadov/trader/internal/agent"
 	"github.com/ismatsamadov/trader/internal/analyst"
+	"github.com/ismatsamadov/trader/internal/binance"
 	"github.com/ismatsamadov/trader/internal/config"
-	"github.com/ismatsamadov/trader/internal/market"
+	"github.com/ismatsamadov/trader/internal/news"
+	"github.com/ismatsamadov/trader/internal/num"
+	"github.com/ismatsamadov/trader/internal/telegram"
 )
 
-const usage = `trader — real-time paper-trading agent for US stocks (no real orders)
+const usage = `trader — AI crypto trading agent for Binance spot
 
-  trader init                  create the paper account
-  trader run [--dry-run]       run one cycle now
-  trader daemon                run a cycle after every close
-  trader status [--json]       agent vs buy-and-hold
+  trader check            check keys, permissions, balances, news and Telegram
+  trader init             start the account with capital_usd from the config
+  trader run              trade around the clock (what Docker runs)
+  trader decide           make one decision now
+  trader decide --dry-run show the live briefing; no model call, no trade
+  trader status [--json]  equity, positions, last decision and AI spend
   trader budget status
   trader budget resolve --attempt ID --cost-usd N --note TEXT
-  trader models                list model IDs for TRADER_MODEL
 
 All commands take --config PATH (default config/agent.json).
-Secrets go in .env: ANTHROPIC_API_KEY and TRADER_MODEL.`
+TRADER_MODE in .env picks testnet (default) or live.`
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -47,14 +52,13 @@ func main() {
 	}
 }
 
-// env holds what tests replace: endpoints, clock and sleep.
+// env holds what tests replace: endpoints and the clock.
 type env struct {
-	HTTP      *http.Client
-	MarketURL string
-	NewsURL   string
-	APIURL    string
-	Now       func() time.Time
-	Sleep     func(context.Context, time.Duration) error
+	HTTP        *http.Client
+	BinanceURL  string
+	APIURL      string
+	TelegramURL string
+	Now         func() time.Time
 }
 
 func run(ctx context.Context, args []string, out io.Writer, e env) error {
@@ -79,8 +83,8 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		cmd, rest = "budget "+rest[0], rest[1:]
 	}
 	allowed := map[string][]string{
-		"init": {"config"}, "run": {"config", "dry-run"}, "daemon": {"config"}, "status": {"config", "json"},
-		"budget status": {"config"}, "budget resolve": {"config", "attempt", "cost-usd", "note"}, "models": {},
+		"check": {"config"}, "init": {"config"}, "run": {"config"}, "decide": {"config", "dry-run"}, "status": {"config", "json"},
+		"budget status": {"config"}, "budget resolve": {"config", "attempt", "cost-usd", "note"},
 	}
 	names, ok := allowed[cmd]
 	if !ok {
@@ -89,8 +93,8 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "config/agent.json", "agent configuration")
-	dryRun := fs.Bool("dry-run", false, "fetch live data and build the briefing without calling the model or saving")
 	asJSON := fs.Bool("json", false, "print machine-readable output")
+	dryRun := fs.Bool("dry-run", false, "build the briefing from live data without calling the model or trading")
 	attempt := fs.String("attempt", "", "budget attempt ID")
 	cost := fs.Float64("cost-usd", -1, "provider-verified cost")
 	note := fs.String("note", "", "reconciliation note")
@@ -113,57 +117,59 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 	if fs.NArg() != 0 {
 		return errors.New("unexpected arguments; run `trader help`")
 	}
-	if cmd == "models" {
-		return listModels(ctx, out, e)
-	}
 	c, err := config.LoadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	budget := &analyst.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: e.Now}
+	eng, err := build(c, e, out)
+	if err != nil {
+		return err
+	}
+	budget := eng.Analyst.Budget
+	if eng.Bot != nil && eng.Bot.ChatID == 0 && cmd != "check" {
+		fmt.Fprintln(out, "Telegram is off: TELEGRAM_CHAT_ID is not set (run `trader check` to find it).")
+		eng.Bot = nil
+	}
 	switch cmd {
+	case "check":
+		return check(ctx, out, c, eng)
 	case "init":
-		st, err := agent.InitState(c, e.Now())
+		st, err := eng.Init(ctx)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "created %s: $%.2f paper cash (%s)\n", st.Name, st.InitialCash.Dollars(), agent.StatePath(c))
+		fmt.Fprintf(out, "Created the %s account with %s %s (%s).\n", st.Mode, st.Capital, c.QuoteAsset, agent.StatePath(c))
 		return nil
 	case "run":
-		runner, err := newAgent(c, budget, e, nil, !*dryRun)
+		if err := modelAvailable(ctx, eng, c); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "trader %s on %s\n", c.Name, c.Mode)
+		return eng.Run(ctx)
+	case "decide":
+		if *dryRun {
+			b, err := eng.Preview(ctx)
+			if err != nil {
+				return err
+			}
+			printBriefing(out, b)
+			return nil
+		}
+		d, err := eng.DecideOnce(ctx)
 		if err != nil {
 			return err
 		}
-		rep, err := runner.RunCycle(ctx, *dryRun)
-		printCycle(out, rep)
-		return err
-	case "daemon":
-		runner, err := newAgent(c, budget, e, out, true)
-		if err != nil {
-			return err
-		}
-		if _, err := runner.Analyst.Client.Models.Get(ctx, c.Model, anthropic.ModelGetParams{}); err != nil {
-			return fmt.Errorf("TRADER_MODEL is not available to this API key (see `trader models`): %w", err)
-		}
-		fmt.Fprintf(out, "trader daemon: %s\n", c.Name)
-		return runner.Daemon(ctx)
+		fmt.Fprintf(out, "Decision #%d saved; cost $%.2f.\n", d.ID, d.CostUSD)
+		return nil
 	case "status":
-		st, err := agent.LoadState(c)
-		if err != nil {
-			return err
-		}
-		summary, err := budget.Summary(ctx)
-		if err != nil {
-			return err
-		}
-		report, err := agent.BuildStatus(c, st, &summary, e.Now())
+		r, err := eng.Report(ctx)
 		if err != nil {
 			return err
 		}
 		if *asJSON {
-			return writeJSON(out, report)
+			return writeJSON(out, r)
 		}
-		fmt.Fprint(out, report.Text())
+		fmt.Fprintln(out, r.Text())
 		return nil
 	case "budget status":
 		summary, err := budget.Summary(ctx)
@@ -184,6 +190,49 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 	return nil
 }
 
+func build(c config.Config, e env, log io.Writer) (*agent.Engine, error) {
+	base, data := binance.TestnetURL, binance.DataURL
+	if c.Mode == config.Live {
+		base = binance.LiveURL
+	}
+	if e.BinanceURL != "" {
+		base, data = e.BinanceURL, e.BinanceURL
+	}
+	opts := []option.RequestOption{option.WithAPIKey(apiKey())}
+	if e.APIURL != "" {
+		opts = append(opts, option.WithBaseURL(e.APIURL))
+	}
+	eng := &agent.Engine{
+		Config:   c,
+		Exchange: &binance.Client{HTTP: exchangeClient(e.HTTP), BaseURL: base, DataURL: data, Key: os.Getenv("BINANCE_API_KEY"), Secret: os.Getenv("BINANCE_API_SECRET"), Now: e.Now},
+		// One budget for testnet and live: both spend the same model key.
+		Analyst: &analyst.Analyst{Config: c, Client: anthropic.NewClient(opts...), Log: log,
+			Budget: &analyst.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: e.Now}},
+		News: news.Feeds{HTTP: e.HTTP, URLs: c.NewsFeeds},
+		Now:  e.Now,
+		Log:  log,
+	}
+	if token := os.Getenv("TELEGRAM_BOT_TOKEN"); token != "" {
+		eng.Bot = &telegram.Bot{HTTP: &http.Client{Timeout: 90 * time.Second}, BaseURL: e.TelegramURL, Token: token}
+		if id := os.Getenv("TELEGRAM_CHAT_ID"); id != "" {
+			chat, err := strconv.ParseInt(id, 10, 64)
+			if err != nil {
+				return nil, errors.New("TELEGRAM_CHAT_ID must be a number")
+			}
+			eng.Bot.ChatID = chat
+		}
+	}
+	return eng, nil
+}
+
+// exchangeClient never follows redirects, so the API key header cannot be
+// carried to another host.
+func exchangeClient(base *http.Client) *http.Client {
+	c := *base
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &c
+}
+
 func apiKey() string {
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 		return key
@@ -191,88 +240,85 @@ func apiKey() string {
 	return os.Getenv("ANTROPIC_API_KEY") // misspelled name kept for older .env files
 }
 
-func anthropicClient(key string, e env) anthropic.Client {
-	opts := []option.RequestOption{option.WithAPIKey(key)}
-	if e.APIURL != "" {
-		opts = append(opts, option.WithBaseURL(e.APIURL))
+func modelAvailable(ctx context.Context, eng *agent.Engine, c config.Config) error {
+	if apiKey() == "" {
+		return errors.New("set ANTHROPIC_API_KEY in .env")
 	}
-	return anthropic.NewClient(opts...)
+	if _, err := eng.Analyst.Client.Models.Get(ctx, c.Model, anthropic.ModelGetParams{}); err != nil {
+		return fmt.Errorf("TRADER_MODEL is not available to this API key: %w", err)
+	}
+	return nil
 }
 
-// newAgent wires the agent; log is nil for one-off runs, which print only a summary.
-func newAgent(c config.Config, budget *analyst.Budget, e env, log io.Writer, withAnalyst bool) (*agent.Agent, error) {
-	a := &agent.Agent{Config: c, Market: market.PriceSource{HTTP: e.HTTP, BaseURL: e.MarketURL}, Now: e.Now, Sleep: e.Sleep, Log: log}
-	if withAnalyst {
-		key := apiKey()
-		if key == "" {
-			return nil, errors.New("set ANTHROPIC_API_KEY in .env or the environment to run the analyst")
+// check tries every outside dependency without trading or calling the model.
+func check(ctx context.Context, out io.Writer, c config.Config, eng *agent.Engine) error {
+	failed := false
+	report := func(err error, ok string) {
+		if err != nil {
+			failed = true
+			fmt.Fprintf(out, "FAIL %v\n", err)
+			return
 		}
-		a.Analyst = &analyst.Analyst{Config: c, Client: anthropicClient(key, e), News: market.NewsSource{HTTP: e.HTTP, BaseURL: e.NewsURL}, Budget: budget, Log: log, Sleep: e.Sleep}
+		fmt.Fprintf(out, "ok   %s\n", ok)
 	}
-	return a, nil
+	fmt.Fprintf(out, "mode %s · %s · capital %g %s\n", c.Mode, strings.Join(c.Symbols, ", "), c.CapitalUSD, c.QuoteAsset)
+	report(modelAvailable(ctx, eng, c), "model "+c.Model)
+	ex := eng.Exchange
+	report(ex.SyncTime(ctx), "Binance reachable")
+	_, err := ex.Symbols(ctx, c.Symbols)
+	report(err, "market rules for "+strings.Join(c.Symbols, ", "))
+	acct, err := ex.Account(ctx)
+	if err == nil {
+		capital, _ := num.FromFloat(c.CapitalUSD)
+		if free := acct.Balances[c.QuoteAsset].Free; free.Less(capital) {
+			err = fmt.Errorf("only %s %s free; capital_usd needs %s", free, c.QuoteAsset, capital)
+		}
+	}
+	report(err, fmt.Sprintf("API key reads the account; %s %s free", acct.Balances[c.QuoteAsset].Free, c.QuoteAsset))
+	if c.Mode == config.Live {
+		p, err := ex.Permissions(ctx)
+		if err == nil && (p.EnableWithdrawals == nil || *p.EnableWithdrawals) {
+			err = errors.New("this API key can withdraw funds; disable withdrawals for it")
+		}
+		report(err, "API key cannot withdraw")
+		if err == nil && !p.IPRestrict {
+			fmt.Fprintln(out, "--   API key has no IP restriction; restricting it to your IP is safer")
+		}
+	}
+	report(ex.TestOrder(ctx, binance.OrderRequest{Symbol: c.Symbols[0], Side: "BUY", QuoteQty: num.Int(10), ClientID: "check"}), "API key may place orders (test order, nothing traded)")
+	items, err := eng.News.Fetch(ctx, eng.Now(), 72*time.Hour, nil)
+	report(err, fmt.Sprintf("%d headlines from %d feeds", len(items), len(c.NewsFeeds)))
+	switch bot := eng.Bot; {
+	case bot == nil:
+		fmt.Fprintln(out, "--   Telegram off (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID for alerts)")
+	case bot.ChatID == 0:
+		chats, err := bot.Chats(ctx)
+		if err == nil && len(chats) == 0 {
+			err = errors.New("send any message to your bot, then run check again to see your chat ID")
+		}
+		for id, name := range chats {
+			fmt.Fprintf(out, "--   chat %d (%s): put TELEGRAM_CHAT_ID=%d in .env\n", id, news.CleanText(name, 60), id)
+		}
+		report(err, "Telegram bot found")
+		failed = true
+	default:
+		report(bot.Send(ctx, "trader check: alerts will arrive here."), "Telegram message sent")
+	}
+	if failed {
+		return errors.New("some checks failed")
+	}
+	return nil
 }
 
-func listModels(ctx context.Context, out io.Writer, e env) error {
-	key := apiKey()
-	if key == "" {
-		return errors.New("set ANTHROPIC_API_KEY in .env or the environment")
+func printBriefing(out io.Writer, b analyst.Briefing) {
+	for _, v := range b.Coins {
+		fmt.Fprintf(out, "%-8s %12.2f · 24h %+.1f%% · 7d %+.1f%% · 30d %+.1f%% · RSI 1h %.0f · 1d %.0f\n", v.Symbol, v.Price, v.Return24H*100, v.Return7D*100, v.Return30D*100, v.RSI14H, v.RSI14D)
 	}
-	client := anthropicClient(key, e)
-	pager := client.Models.ListAutoPaging(ctx, anthropic.ModelListParams{})
-	for pager.Next() {
-		m := pager.Current()
-		fmt.Fprintf(out, "%s\t%s\n", m.ID, m.DisplayName)
+	fmt.Fprintf(out, "%d headlines in the briefing\n", len(b.Headlines))
+	for _, h := range b.Headlines[:min(3, len(b.Headlines))] {
+		fmt.Fprintf(out, "  %s · %s\n", h.Source, h.Title)
 	}
-	return pager.Err()
-}
-
-func printCycle(out io.Writer, rep agent.CycleReport) {
-	if rep.Status == "" {
-		return
-	}
-	head := rep.Session + " · " + strings.ReplaceAll(rep.Status, "_", " ")
-	if d := rep.Decision; d != nil {
-		head += fmt.Sprintf(" · cost $%.2f", d.CostUSD)
-	}
-	fmt.Fprintln(out, head)
-	item := func(label, value string) { fmt.Fprintf(out, "  %-9s %s\n", label+":", value) }
-	if b := rep.Briefing; b != nil {
-		closes := []string{}
-		for _, ind := range b.Universe {
-			closes = append(closes, fmt.Sprintf("%s %.2f", ind.Symbol, ind.Close))
-		}
-		if b.Market != nil {
-			closes = append(closes, fmt.Sprintf("%s %.2f", b.Market.Symbol, b.Market.Close))
-		}
-		item("data", strings.Join(closes, " · ")+" (no model call, nothing saved)")
-	}
-	for _, f := range rep.Fills {
-		item("filled", fmt.Sprintf("%s %d %s @ $%.2f on %s", strings.ToUpper(f.Side), f.Quantity, f.Symbol, f.Price.Dollars(), f.Session))
-	}
-	for _, r := range rep.Rejections {
-		item("rejected", fmt.Sprintf("%s on %s: %s", r.Symbol, r.Session, r.Reason))
-	}
-	for _, e := range rep.CorporateEvents {
-		item("event", e)
-	}
-	if d := rep.Decision; d != nil {
-		ratings := []string{}
-		for _, line := range d.Plan {
-			ratings = append(ratings, line.Symbol+" "+string(line.Rating))
-		}
-		item("ratings", strings.Join(ratings, " · "))
-		orders := []string{}
-		for _, o := range rep.Orders {
-			orders = append(orders, fmt.Sprintf("%s %d %s", strings.ToUpper(o.Side), o.Quantity, o.Symbol))
-		}
-		if len(orders) == 0 {
-			orders = append(orders, "none")
-		}
-		item("orders", strings.Join(orders, ", "))
-	}
-	for _, n := range rep.Notes {
-		item("note", n)
-	}
+	fmt.Fprintln(out, "preview only: no model call, no trade, nothing saved")
 }
 
 func writeJSON(out io.Writer, v any) error {

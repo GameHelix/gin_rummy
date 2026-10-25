@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,21 +14,24 @@ import (
 	"time"
 
 	"github.com/ismatsamadov/trader/internal/agent"
-	"github.com/ismatsamadov/trader/internal/market"
+	"github.com/ismatsamadov/trader/internal/testkit"
 )
 
 // Synthetic fixtures only: no network access and no paid requests.
 
-func writeConfig(t *testing.T) string {
+var now = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+
+func writeConfig(t *testing.T, feed string) string {
 	t.Helper()
 	dir := t.TempDir()
 	c := map[string]any{
-		"name": "cli-test", "symbols": []string{"AAA", "BBB"}, "market_symbol": "MKT",
-		"initial_cash": 10000, "commission": 1, "slippage_bps": 5,
-		"max_position_weight": 0.4, "max_invested_weight": 0.8, "rebalance_band": 0.03, "min_trade_usd": 50,
-		"horizon_sessions": 3, "close_buffer_minutes": 30,
-		"model": "test-model", "effort": "high", "max_output_tokens": 4000, "max_turns": 4, "samples": 1, "news_items": 0,
-		"refusal_fallback": true, "input_usd_per_million": 4, "output_usd_per_million": 20, "cache_write_usd_per_million": 5, "cache_read_usd_per_million": 0.2,
+		"name": "cli-test", "symbols": []string{"BTCUSDT", "ETHUSDT"}, "quote_asset": "USDT", "capital_usd": 100,
+		"max_position_weight": 0.45, "max_invested_weight": 0.9, "rebalance_band": 0.05, "min_trade_usd": 10,
+		"decision_interval_hours": 4, "move_trigger_1h_pct": 3, "move_trigger_since_decision_pct": 5, "event_cooldown_minutes": 60, "poll_seconds": 30,
+		"news_feeds": []string{feed}, "news_alert_keywords": []string{"etf"}, "max_event_decisions_per_day": 8, "news_items": 5, "score_horizon_hours": 24,
+		"daily_loss_limit_pct": 10, "max_drawdown_pct": 30,
+		"model": "test-model", "effort": "high", "max_output_tokens": 4000, "max_turns": 4, "samples": 1,
+		"refusal_fallback": false, "input_usd_per_million": 4, "output_usd_per_million": 20, "cache_write_usd_per_million": 5, "cache_read_usd_per_million": 0.2,
 		"max_daily_llm_usd": 5, "max_monthly_llm_usd": 50, "data_dir": filepath.Join(dir, "data"),
 	}
 	raw, _ := json.Marshal(c)
@@ -40,107 +42,74 @@ func writeConfig(t *testing.T) string {
 	return path
 }
 
-func marketServer(t *testing.T) *httptest.Server {
-	ny, _ := time.LoadLocation("America/New_York")
-	sessions, _ := market.NYSESessions("2026-01-02", "2026-10-23")
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		symbol := strings.TrimPrefix(r.URL.Path, "/v8/finance/chart/")
-		var ts []int64
-		var o, h, l, c []float64
-		var v []int64
-		price := 100.0
-		for i, s := range sessions {
-			d, _ := time.ParseInLocation(time.DateOnly, s.Date, ny)
-			next := price * (1 + 0.003*float64(i%5-2))
-			ts = append(ts, d.Add(9*time.Hour+30*time.Minute).Unix())
-			o, c = append(o, price), append(c, next)
-			h, l = append(h, max(price, next)+0.5), append(l, min(price, next)-0.5)
-			v = append(v, 1000)
-			price = next
-		}
-		json.NewEncoder(w).Encode(map[string]any{"chart": map[string]any{"result": []any{map[string]any{
-			"meta":       map[string]any{"symbol": symbol, "currency": "USD", "exchangeTimezoneName": "America/New_York"},
-			"timestamp":  ts,
-			"indicators": map[string]any{"quote": []any{map[string]any{"open": o, "high": h, "low": l, "close": c, "volume": v}}},
-		}}}})
-	}))
-	t.Cleanup(s.Close)
-	return s
-}
-
+// apiServer answers model lookups and replies to every message with ratings.
 func apiServer(t *testing.T, calls *int) *httptest.Server {
+	script := testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, testkit.CitePrices)
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
-		*calls++
 		w.Header().Set("Content-Type", "application/json")
-		signal := func(rating string, sym string) map[string]any {
-			return map[string]any{"rating": rating, "confidence": "high", "rationale": "Trend above both averages.", "evidence_ids": []string{"prices:" + sym}}
+		if strings.HasPrefix(r.URL.Path, "/v1/models/") {
+			json.NewEncoder(w).Encode(map[string]any{"id": "test-model", "type": "model", "display_name": "Test", "created_at": "2026-01-01T00:00:00Z"})
+			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"id": "msg_1", "type": "message", "role": "assistant", "model": "test-model", "stop_reason": "tool_use", "stop_sequence": nil,
-			"content": []any{map[string]any{"type": "tool_use", "id": "toolu_1", "name": "submit_signals", "input": map[string]any{
-				"summary": "Constructive on AAA.",
-				"signals": map[string]any{"AAA": signal("strong_buy", "AAA"), "BBB": signal("hold", "BBB")},
-			}}},
-			"usage": map[string]any{"input_tokens": 2000, "output_tokens": 500, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
-		})
+		*calls++
+		_, body := script("")
+		json.NewEncoder(w).Encode(body)
 	}))
 	t.Cleanup(s.Close)
 	return s
 }
 
-func testEnv(market, api string) env {
-	ny, _ := time.LoadLocation("America/New_York")
-	now := time.Date(2026, 10, 23, 17, 0, 0, 0, ny)
-	return env{HTTP: http.DefaultClient, MarketURL: market, APIURL: api, Now: func() time.Time { return now }, Sleep: func(context.Context, time.Duration) error { return nil }}
+func setup(t *testing.T) (string, env, *int) {
+	t.Helper()
+	feed := testkit.NewsServer(t, func() []testkit.Headline {
+		return []testkit.Headline{{Title: "Bitcoin ETF flows steady", At: now.Add(-time.Hour)}}
+	})
+	ex := testkit.NewBinance(func() time.Time { return now })
+	calls := 0
+	e := env{HTTP: feed.Client(), BinanceURL: ex.Server(t).URL, APIURL: apiServer(t, &calls).URL, Now: func() time.Time { return now }}
+	for k, v := range map[string]string{"ANTHROPIC_API_KEY": "test-key", "ANTROPIC_API_KEY": "", "BINANCE_API_KEY": testkit.Key, "BINANCE_API_SECRET": testkit.Secret,
+		"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "", "TRADER_MODE": "", "TRADER_MODEL": ""} {
+		t.Setenv(k, v)
+	}
+	return writeConfig(t, feed.URL), e, &calls
 }
 
 func TestHelpAndArgumentValidation(t *testing.T) {
 	var out bytes.Buffer
-	if err := run(context.Background(), []string{"help"}, &out, env{}); err != nil || !strings.Contains(out.String(), "trader daemon") {
+	if err := run(context.Background(), []string{"help"}, &out, env{}); err != nil || !strings.Contains(out.String(), "trader run") {
 		t.Fatalf("help: %v %q", err, out.String())
 	}
-	for _, args := range [][]string{{"trade"}, {"status", "--dry-run"}, {"init", "extra"}, {"budget"}, {"budget", "delete"}} {
+	for _, args := range [][]string{{"trade"}, {"status", "--dry-run"}, {"init", "extra"}, {"budget"}, {"budget", "delete"}, {"decide", "--json"}} {
 		if err := run(context.Background(), args, io.Discard, env{}); err == nil {
 			t.Fatalf("%v should be rejected", args)
 		}
 	}
 }
 
-func TestInitDryRunRunAndStatus(t *testing.T) {
-	cfg := writeConfig(t)
-	calls := 0
-	e := testEnv(marketServer(t).URL, apiServer(t, &calls).URL)
+func TestInitDecideAndStatus(t *testing.T) {
+	cfg, e, calls := setup(t)
 	ctx := context.Background()
-	t.Setenv("ANTHROPIC_API_KEY", "")
-	t.Setenv("ANTROPIC_API_KEY", "")
 	var out bytes.Buffer
-	if err := run(ctx, []string{"init", "--config", cfg}, &out, e); err != nil || !strings.Contains(out.String(), "$10000.00 paper cash") {
+	if err := run(ctx, []string{"init", "--config", cfg}, &out, e); err != nil || !strings.Contains(out.String(), "testnet account with 100 USDT") {
 		t.Fatalf("init: %v %s", err, out.String())
 	}
 	if err := run(ctx, []string{"init", "--config", cfg}, io.Discard, e); err == nil {
 		t.Fatal("init must not overwrite an existing account")
 	}
 	out.Reset()
-	if err := run(ctx, []string{"run", "--dry-run", "--config", cfg}, &out, e); err != nil || !strings.Contains(out.String(), "no model call") || calls != 0 {
-		t.Fatalf("dry run needs no API key and makes no model call: %v %s", err, out.String())
+	if err := run(ctx, []string{"decide", "--dry-run", "--config", cfg}, &out, e); err != nil || *calls != 0 || !strings.Contains(out.String(), "BTCUSDT") || !strings.Contains(out.String(), "Bitcoin ETF flows steady") {
+		t.Fatalf("dry run: %v (calls %d) %s", err, *calls, out.String())
 	}
-	if err := run(ctx, []string{"run", "--config", cfg}, io.Discard, e); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
-		t.Fatalf("a real run without a key must fail clearly: %v", err)
-	}
-	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 	out.Reset()
-	if err := run(ctx, []string{"run", "--config", cfg}, &out, e); err != nil || calls != 1 {
-		t.Fatalf("run: %v (calls %d) %s", err, calls, out.String())
-	}
-	if !strings.Contains(out.String(), "orders:   BUY") || !strings.Contains(out.String(), "AAA strong_buy") || strings.Contains(out.String(), "attempt") {
-		t.Fatalf("run output: %s", out.String())
+	if err := run(ctx, []string{"decide", "--config", cfg}, &out, e); err != nil || *calls != 1 || !strings.Contains(out.String(), "Decision #1 saved") {
+		t.Fatalf("decide: %v (calls %d) %s", err, *calls, out.String())
 	}
 	out.Reset()
 	if err := run(ctx, []string{"status", "--config", cfg}, &out, e); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"buy&hold", "orders     BUY", "spend      today $0.02"} {
+	for _, want := range []string{"cli-test · testnet · trading", "BTC 0.0005", "#1 Oct 25 12:00 UTC requested from the command line: BTC strong_buy · ETH hold", "AI today $0.01"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("status lacks %q:\n%s", want, out.String())
 		}
@@ -149,12 +118,41 @@ func TestInitDryRunRunAndStatus(t *testing.T) {
 	if err := run(ctx, []string{"status", "--json", "--config", cfg}, &out, e); err != nil {
 		t.Fatal(err)
 	}
-	var report agent.StatusReport
-	if err := json.Unmarshal(out.Bytes(), &report); err != nil || len(report.Pending) != 1 || report.LastSession != "2026-10-23" {
-		t.Fatalf("status json: %v %+v", err, report)
+	var r agent.Report
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil || r.Trades != 1 || r.Last == nil || r.Mode != "testnet" {
+		t.Fatalf("status json: %v %+v", err, r)
 	}
 	out.Reset()
-	if err := run(ctx, []string{"budget", "status", "--config", cfg}, &out, e); err != nil || !strings.Contains(out.String(), fmt.Sprintf(`"month_calls": %d`, 1)) {
+	if err := run(ctx, []string{"budget", "status", "--config", cfg}, &out, e); err != nil || !strings.Contains(out.String(), `"month_calls": 1`) {
 		t.Fatalf("budget status: %v %s", err, out.String())
+	}
+}
+
+func TestCheckReportsEachDependency(t *testing.T) {
+	cfg, e, calls := setup(t)
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"check", "--config", cfg}, &out, e); err != nil {
+		t.Fatalf("check: %v\n%s", err, out.String())
+	}
+	for _, want := range []string{"ok   model test-model", "ok   API key reads the account; 1000 USDT free", "ok   API key may place orders", "ok   1 headlines from 1 feeds", "--   Telegram off"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("check lacks %q:\n%s", want, out.String())
+		}
+	}
+	if *calls != 0 {
+		t.Fatal("check must not call the model")
+	}
+	tg := &testkit.Telegram{ChatID: 4242, Now: func() time.Time { return now }}
+	tg.Command("hi")
+	e.TelegramURL = tg.Server(t).URL
+	t.Setenv("TELEGRAM_BOT_TOKEN", "T")
+	out.Reset()
+	if err := run(context.Background(), []string{"check", "--config", cfg}, &out, e); err == nil || !strings.Contains(out.String(), "TELEGRAM_CHAT_ID=4242") {
+		t.Fatalf("check must show the chat ID to configure: %v\n%s", err, out.String())
+	}
+	t.Setenv("TELEGRAM_CHAT_ID", "4242")
+	out.Reset()
+	if err := run(context.Background(), []string{"check", "--config", cfg}, &out, e); err != nil || len(tg.Sent()) != 1 {
+		t.Fatalf("check must send a test message: %v\n%s", err, out.String())
 	}
 }
