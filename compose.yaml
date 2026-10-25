@@ -27,10 +27,10 @@ services:
       postgres:
         condition: service_healthy
     # The engine API: for the app on this machine, and for the other
-    # Wickwise services as trader:8080 on the shared network.
+    # Candylario services as trader:8080 on the shared network.
     ports:
       - "127.0.0.1:8080:8080"
-    networks: [default, wickwise]
+    networks: [default, candylario]
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
@@ -41,7 +41,7 @@ services:
     stop_grace_period: 30s
 
 networks:
-  wickwise:
+  candylario:
     external: true
 
 volumes:

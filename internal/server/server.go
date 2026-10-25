@@ -24,11 +24,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wickwise/trader/api"
-	"github.com/wickwise/trader/internal/agent"
-	"github.com/wickwise/trader/internal/audit"
-	"github.com/wickwise/trader/internal/fleet"
-	"github.com/wickwise/trader/internal/pg"
+	"github.com/candylario/trader/api"
+	"github.com/candylario/trader/internal/agent"
+	"github.com/candylario/trader/internal/audit"
+	"github.com/candylario/trader/internal/fleet"
+	"github.com/candylario/trader/internal/pg"
 )
 
 type Server struct {

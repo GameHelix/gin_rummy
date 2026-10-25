@@ -21,14 +21,14 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wickwise/trader/internal/analyst"
-	"github.com/wickwise/trader/internal/audit"
-	"github.com/wickwise/trader/internal/binance"
-	"github.com/wickwise/trader/internal/config"
-	"github.com/wickwise/trader/internal/news"
-	"github.com/wickwise/trader/internal/num"
-	"github.com/wickwise/trader/internal/store"
-	"github.com/wickwise/trader/internal/telegram"
+	"github.com/candylario/trader/internal/analyst"
+	"github.com/candylario/trader/internal/audit"
+	"github.com/candylario/trader/internal/binance"
+	"github.com/candylario/trader/internal/config"
+	"github.com/candylario/trader/internal/news"
+	"github.com/candylario/trader/internal/num"
+	"github.com/candylario/trader/internal/store"
+	"github.com/candylario/trader/internal/telegram"
 )
 
 type Engine struct {

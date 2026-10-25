@@ -13,10 +13,10 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"github.com/wickwise/trader/internal/config"
-	"github.com/wickwise/trader/internal/market"
-	"github.com/wickwise/trader/internal/news"
-	"github.com/wickwise/trader/internal/testkit"
+	"github.com/candylario/trader/internal/config"
+	"github.com/candylario/trader/internal/market"
+	"github.com/candylario/trader/internal/news"
+	"github.com/candylario/trader/internal/testkit"
 )
 
 var decisionTime = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploys the engine to a server prepared by wickwise/infra: builds the image
+# Deploys the engine to a server prepared by candylario/infra: builds the image
 # for the server's CPU, copies it over SSH with compose.yaml, config/ and
 # .env, and restarts the stack. The data and the database stay on the server.
 #
@@ -29,6 +29,6 @@ docker save trader:deploy | gzip | ssh "$host" 'gunzip | docker load --quiet && 
 scp -q compose.yaml "$host:$dir/compose.yaml"
 scp -qr config/. "$host:$dir/config/"
 ssh "$host" "umask 077 && cat >$dir/.env" <.env
-ssh "$host" "docker network inspect wickwise >/dev/null 2>&1 || docker network create wickwise >/dev/null"
+ssh "$host" "docker network inspect candylario >/dev/null 2>&1 || docker network create candylario >/dev/null"
 ssh "$host" "cd $dir && docker compose up -d --no-build --remove-orphans && docker image prune -f >/dev/null"
 echo "Deployed to $host. Logs: ssh $host 'cd $dir && docker compose logs -f trader'"

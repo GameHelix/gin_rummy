@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wickwise/trader/internal/analyst"
-	"github.com/wickwise/trader/internal/binance"
-	"github.com/wickwise/trader/internal/config"
-	"github.com/wickwise/trader/internal/num"
+	"github.com/candylario/trader/internal/analyst"
+	"github.com/candylario/trader/internal/binance"
+	"github.com/candylario/trader/internal/config"
+	"github.com/candylario/trader/internal/num"
 )
 
 var errStopped = errors.New("trading is stopped")

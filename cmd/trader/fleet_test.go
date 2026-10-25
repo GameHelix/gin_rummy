@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wickwise/trader/internal/testkit"
-	"github.com/wickwise/trader/internal/vault"
+	"github.com/candylario/trader/internal/testkit"
+	"github.com/candylario/trader/internal/vault"
 )
 
 // fleetEnv points DATABASE_URL at a fresh database and sets a master key,

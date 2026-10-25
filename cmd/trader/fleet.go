@@ -20,14 +20,14 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/google/uuid"
 
-	"github.com/wickwise/trader/internal/agent"
-	"github.com/wickwise/trader/internal/config"
-	"github.com/wickwise/trader/internal/fleet"
-	"github.com/wickwise/trader/internal/news"
-	"github.com/wickwise/trader/internal/pg"
-	"github.com/wickwise/trader/internal/server"
-	"github.com/wickwise/trader/internal/store"
-	"github.com/wickwise/trader/internal/vault"
+	"github.com/candylario/trader/internal/agent"
+	"github.com/candylario/trader/internal/config"
+	"github.com/candylario/trader/internal/fleet"
+	"github.com/candylario/trader/internal/news"
+	"github.com/candylario/trader/internal/pg"
+	"github.com/candylario/trader/internal/server"
+	"github.com/candylario/trader/internal/store"
+	"github.com/candylario/trader/internal/vault"
 )
 
 var fleetCommands = map[string]bool{"serve": true, "import": true, "tenant": true, "key": true, "agent": true}

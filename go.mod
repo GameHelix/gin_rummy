@@ -1,4 +1,4 @@
-module github.com/wickwise/trader
+module github.com/candylario/trader
 
 go 1.27
 

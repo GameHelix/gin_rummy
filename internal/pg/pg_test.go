@@ -10,8 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wickwise/trader/internal/audit"
-	"github.com/wickwise/trader/internal/testkit"
+	"github.com/candylario/trader/internal/audit"
+	"github.com/candylario/trader/internal/testkit"
 )
 
 // testDB returns a fresh, migrated database, or skips the test.

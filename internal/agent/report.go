@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wickwise/trader/internal/analyst"
-	"github.com/wickwise/trader/internal/config"
-	"github.com/wickwise/trader/internal/num"
+	"github.com/candylario/trader/internal/analyst"
+	"github.com/candylario/trader/internal/config"
+	"github.com/candylario/trader/internal/num"
 )
 
 type Position struct {

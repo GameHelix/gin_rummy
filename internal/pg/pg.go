@@ -21,7 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/wickwise/trader/internal/audit"
+	"github.com/candylario/trader/internal/audit"
 )
 
 //go:embed migrations/*.sql

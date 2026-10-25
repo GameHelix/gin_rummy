@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wickwise/trader/internal/vault"
+	"github.com/candylario/trader/internal/vault"
 )
 
 func TestTenantsAgentsVersionsAndKeys(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wickwise/trader/internal/num"
+	"github.com/candylario/trader/internal/num"
 )
 
 func TestSignatureMatchesTheDocumentedExample(t *testing.T) {

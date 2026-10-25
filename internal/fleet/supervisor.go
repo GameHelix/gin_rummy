@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wickwise/trader/internal/agent"
-	"github.com/wickwise/trader/internal/pg"
+	"github.com/candylario/trader/internal/agent"
+	"github.com/candylario/trader/internal/pg"
 )
 
 // Supervisor keeps every runnable agent running: it starts new ones, stops

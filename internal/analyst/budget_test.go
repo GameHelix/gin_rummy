@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wickwise/trader/internal/store"
+	"github.com/candylario/trader/internal/store"
 )
 
 func TestBudgetEnforcesDailyAndMonthlyCaps(t *testing.T) {

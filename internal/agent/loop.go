@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wickwise/trader/internal/analyst"
-	"github.com/wickwise/trader/internal/config"
-	"github.com/wickwise/trader/internal/news"
-	"github.com/wickwise/trader/internal/num"
+	"github.com/candylario/trader/internal/analyst"
+	"github.com/candylario/trader/internal/config"
+	"github.com/candylario/trader/internal/news"
+	"github.com/candylario/trader/internal/num"
 )
 
 // tick is one pass of the loop: settle orders, refresh prices, record
