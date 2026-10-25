@@ -172,6 +172,9 @@ func (e *Engine) checkKey(ctx context.Context) (binance.Permissions, error) {
 // and a buy-and-hold twin that invests the same capital once.
 func (e *Engine) Init(ctx context.Context) (State, error) {
 	c := e.Config
+	if _, err := os.Stat(StatePath(c)); err == nil {
+		return State{}, fmt.Errorf("%s already exists; the account is already initialised", StatePath(c))
+	}
 	unlock, err := e.lock(ctx)
 	if err != nil {
 		return State{}, err
