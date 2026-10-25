@@ -2,7 +2,7 @@ GOCACHE ?= $(CURDIR)/.cache/go-build
 export GOCACHE
 CONFIG ?= config/agent.json
 
-.PHONY: test check build verify init preview decide run status
+.PHONY: test check smoke build verify init preview decide run status
 
 test:
 	go test -race ./...
@@ -10,6 +10,9 @@ test:
 check:
 	go vet ./...
 	go test -race ./...
+
+smoke:
+	TRADER_TESTNET=1 go test -run TestTestnetRoundTrip -count=1 -v ./internal/agent/
 
 build:
 	go build -o bin/trader ./cmd/trader
