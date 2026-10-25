@@ -377,10 +377,15 @@ const (
 	sellAllReason = "sell-all from Telegram; /resume to trade again"
 )
 
-// stale reports a command that was already old when it arrived, because it
-// was sent while the agent was offline. A stop is honoured regardless.
+// stale reports a command that changes something but was already old when
+// it arrived, because it was sent while the agent was offline. A stop is
+// honoured regardless, and questions such as /status are simply answered.
 func stale(in inbound) bool {
-	return in.cmd.Name != "stop" && in.received.Sub(in.cmd.Sent) > 10*time.Minute
+	switch in.cmd.Name {
+	case "sellall", "decide", "resume":
+		return in.received.Sub(in.cmd.Sent) > 10*time.Minute
+	}
+	return false
 }
 
 // checkInbox runs before every order. A stop or sell-all takes effect at
