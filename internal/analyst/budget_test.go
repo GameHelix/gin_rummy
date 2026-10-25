@@ -119,7 +119,34 @@ func TestJournalDropsFinishedAttemptsFromBeforeLastMonth(t *testing.T) {
 	for _, a := range got.Attempts {
 		ids = append(ids, a.ID)
 	}
-	if len(ids) != 3 || ids[0] != "old-open" || ids[1] != "last-month" {
+	// The old open attempt is settled after an hour, and then is old enough to drop.
+	if len(ids) != 2 || ids[0] != "last-month" {
 		t.Fatalf("kept %v", ids)
+	}
+}
+
+func TestAttemptsLeftOpenByACrashSettleThemselves(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	b := &Budget{Path: t.TempDir() + "/budget.json", DailyUSD: 5, MonthlyUSD: 50, Now: func() time.Time { return now }}
+	twoHoursAgo := now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	j := budgetJournal{Version: "budget-v2", Attempts: []BudgetAttempt{
+		{ID: "never-sent", Status: attemptReserved, CreatedAt: twoHoursAgo, ReservedNanos: 300_000_000},
+		{ID: "in-flight", Status: attemptDispatched, CreatedAt: twoHoursAgo, ReservedNanos: 400_000_000},
+		{ID: "running", Status: attemptDispatched, CreatedAt: now.Add(-time.Minute).Format(time.RFC3339Nano), ReservedNanos: 100_000_000},
+	}}
+	if err := store.WriteJSON(b.Path, j); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Reserve(context.Background(), "d1", "p", 0.01); err != nil {
+		t.Fatal(err)
+	}
+	s, err := b.Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the call still running and the new one stay open; the stale call
+	// whose outcome is unknown is charged its $0.40 reserve.
+	if len(s.Open) != 2 || s.TodayUSD < 0.51 || s.TodayUSD > 0.52 {
+		t.Fatalf("open %d, today $%.2f", len(s.Open), s.TodayUSD)
 	}
 }

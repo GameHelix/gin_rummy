@@ -61,9 +61,12 @@ func (e *Engine) failed(ctx context.Context, now time.Time, err error) {
 	e.alert(ctx, "decide", msg)
 }
 
-// watch reads the last hour of one-minute candles for each symbol.
+// watch reads the last hour of one-minute candles from the live market, for
+// the model and the move triggers, and the trading venue's own prices, for
+// valuing the account and sizing orders. On testnet the two differ slightly;
+// live they are the same market.
 func (e *Engine) watch(ctx context.Context) error {
-	prices, moves := map[string]num.Dec{}, map[string]float64{}
+	live, moves := map[string]num.Dec{}, map[string]float64{}
 	for _, s := range e.Config.Symbols {
 		k, err := e.Exchange.Klines(ctx, s, "1m", 61, time.Time{})
 		if err != nil {
@@ -76,9 +79,13 @@ func (e *Engine) watch(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		prices[s], moves[s] = p, k[len(k)-1].C/k[0].O-1
+		live[s], moves[s] = p, k[len(k)-1].C/k[0].O-1
 	}
-	e.prices, e.moves = prices, moves
+	prices, err := e.Exchange.Prices(ctx, e.Config.Symbols)
+	if err != nil {
+		return err
+	}
+	e.prices, e.live, e.moves = prices, live, moves
 	return nil
 }
 
@@ -255,7 +262,7 @@ func (e *Engine) trigger(now time.Time) (string, string) {
 	}
 	for _, s := range c.Symbols {
 		if p := last.Prices[s]; c.MoveTriggerSinceDecisionPct > 0 && p.Sign() > 0 {
-			if m := e.prices[s].Float()/p.Float() - 1; math.Abs(m)*100 >= c.MoveTriggerSinceDecisionPct {
+			if m := e.live[s].Float()/p.Float() - 1; math.Abs(m)*100 >= c.MoveTriggerSinceDecisionPct {
 				return kindMove, fmt.Sprintf("%s moved %+.1f%% since the last decision", c.Base(s), m*100)
 			}
 		}

@@ -29,7 +29,7 @@ docker compose run --rm trader status
   - Keys that can withdraw are refused.
   - The agent trades only its own capital.
 - **Settings:** everything is in `config/agent.json`; restart the container after editing it.
-- **Testnet:** decisions use live Binance prices and news, but orders fill on the testnet's own book with test funds and no fees, so its profit and loss is only indicative.
-- **AI spend:** `trader budget status` shows it. If the agent crashes mid-call, that call stays reserved until `trader budget resolve`.
+- **Testnet:** decisions use live Binance prices and news. Orders fill on the testnet's own book with test funds; the account is valued at those prices and pays Binance's 0.1% fee on paper, so its profit and loss reflects real costs.
+- **AI spend:** `trader budget status` shows it. A model call cut off by a crash is charged its maximum after an hour.
 
 `make check` runs the tests.

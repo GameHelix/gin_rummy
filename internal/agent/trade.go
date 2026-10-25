@@ -158,6 +158,9 @@ func (e *Engine) book(ctx context.Context, id int, o binance.Order) (*Trade, err
 			feeOther = feeOther.Add(e.valueFee(ctx, f.CommissionAsset, f.Commission))
 		}
 	}
+	if c.Mode != config.Live && feeBase.IsZero() && feeQuote.IsZero() && feeOther.IsZero() {
+		feeQuote = o.QuoteQty.Mul(simulatedFee)
+	}
 	l := &e.st.Ledger
 	if o.Side == "BUY" {
 		l.Cash = l.Cash.Sub(o.QuoteQty).Sub(feeQuote)
@@ -248,7 +251,7 @@ func (e *Engine) reconcile(ctx context.Context) {
 		e.alert(ctx, "account", "⚠️ Binance account unavailable: "+err.Error())
 		return
 	}
-	e.st.TakerFee = acct.Taker
+	e.st.TakerFee = e.feeRate(acct.Taker)
 	c := e.Config
 	var short []string
 	if have := acct.Balances[c.QuoteAsset].Total(); have.Less(e.st.Ledger.Cash) {

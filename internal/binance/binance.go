@@ -208,14 +208,15 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int,
 	return out, nil
 }
 
-// Prices returns the latest trade price of each symbol.
+// Prices returns the latest trade price of each symbol where orders fill:
+// on the testnet that is the testnet's own book, not the live market.
 func (c *Client) Prices(ctx context.Context, symbols []string) (map[string]num.Dec, error) {
 	list, _ := json.Marshal(symbols)
 	var rows []struct {
 		Symbol string  `json:"symbol"`
 		Price  num.Dec `json:"price"`
 	}
-	if err := c.request(ctx, http.MethodGet, c.DataURL, "/api/v3/ticker/price", url.Values{"symbols": {string(list)}}, false, &rows); err != nil {
+	if err := c.request(ctx, http.MethodGet, c.BaseURL, "/api/v3/ticker/price", url.Values{"symbols": {string(list)}}, false, &rows); err != nil {
 		return nil, err
 	}
 	out := map[string]num.Dec{}

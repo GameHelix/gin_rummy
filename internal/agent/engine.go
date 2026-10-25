@@ -40,6 +40,7 @@ type Engine struct {
 	st        State
 	rules     map[string]binance.Symbol
 	prices    map[string]num.Dec
+	live      map[string]num.Dec
 	moves     map[string]float64
 	headlines []news.Item
 	newsAt    time.Time
@@ -252,10 +253,21 @@ func (e *Engine) Init(ctx context.Context) (State, error) {
 	now := e.now()
 	st := State{
 		Version: stateVersion, Mode: c.Mode, Name: c.Name, Symbols: c.Symbols, CreatedAt: now, Nonce: nonce.Text(36),
-		Capital: capital, RiskBase: capital, TakerFee: acct.Taker, Ledger: Ledger{Cash: capital, Holdings: map[string]num.Dec{}},
-		Benchmark: buyAndHold(c, capital, prices, acct.Taker), Day: now.Format(time.DateOnly), DayEquity: capital, NextID: 1,
+		Capital: capital, RiskBase: capital, TakerFee: e.feeRate(acct.Taker), Ledger: Ledger{Cash: capital, Holdings: map[string]num.Dec{}},
+		Benchmark: buyAndHold(c, capital, prices, e.feeRate(acct.Taker)), Day: now.Format(time.DateOnly), DayEquity: capital, NextID: 1,
 	}
 	return st, saveState(c, st)
+}
+
+// simulatedFee is Binance's standard spot fee. The testnet charges none, so
+// testnet fills pay it on paper to keep their profit and loss realistic.
+var simulatedFee = num.MustParse("0.001")
+
+func (e *Engine) feeRate(taker num.Dec) num.Dec {
+	if e.Config.Mode != config.Live && taker.IsZero() {
+		return simulatedFee
+	}
+	return taker
 }
 
 func buyAndHold(c config.Config, capital num.Dec, prices map[string]num.Dec, fee num.Dec) Ledger {

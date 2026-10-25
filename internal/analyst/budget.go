@@ -124,10 +124,25 @@ func (b *Budget) edit(ctx context.Context, fn func(*budgetJournal) error) error 
 	return store.WriteJSON(b.Path, j)
 }
 
-// compact drops finished attempts from before last month: the caps only
-// count this month, and open attempts stay until they are resolved.
+// compact settles attempts left open by a crash and drops finished attempts
+// from before last month, since the caps only count this month. An attempt
+// open for an hour can no longer be running: one that was never sent is
+// released, and one whose outcome is unknown is charged its full reserve.
 func (b *Budget) compact(j *budgetJournal) {
 	now := b.now()
+	for i := range j.Attempts {
+		a := &j.Attempts[i]
+		created, err := time.Parse(time.RFC3339Nano, a.CreatedAt)
+		if err != nil || created.After(now.Add(-time.Hour)) {
+			continue
+		}
+		switch a.Status {
+		case attemptReserved:
+			a.Status, a.ReservedNanos, a.Note = attemptReleased, 0, "never sent"
+		case attemptDispatched, attemptUncertain:
+			a.Status, a.SpentNanos, a.ReservedNanos, a.Note = attemptResolved, a.ReservedNanos, 0, "outcome unknown; charged its full reserve"
+		}
+	}
 	cutoff := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
 	kept := j.Attempts[:0]
 	for _, a := range j.Attempts {

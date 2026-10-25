@@ -63,6 +63,7 @@ type Binance struct {
 	Rejected   int
 	tradesDown bool
 	feeAsset   string
+	premium    float64
 	path       map[string][]point
 	base       map[string]float64
 }
@@ -108,6 +109,17 @@ func NewBinance(now func() time.Time) *Binance {
 
 func (b *Binance) SetFault(f string) { b.mu.Lock(); b.Fault = f; b.mu.Unlock() }
 
+// SetVenuePremium makes the venue's own ticker and fills sit a factor away
+// from the market data, as the testnet's book does.
+func (b *Binance) SetVenuePremium(f float64) { b.mu.Lock(); b.premium = f; b.mu.Unlock() }
+
+func (b *Binance) venue(symbol string, at time.Time) float64 {
+	if b.premium == 0 {
+		return b.price(symbol, at)
+	}
+	return round2(b.price(symbol, at) * b.premium)
+}
+
 // SetRejecting makes Binance reject every order for symbol until reset.
 func (b *Binance) SetRejecting(symbol string) { b.mu.Lock(); b.rejecting = symbol; b.mu.Unlock() }
 
@@ -116,7 +128,8 @@ func (b *Binance) RejectedCount() int { b.mu.Lock(); defer b.mu.Unlock(); return
 // SetTradesDown makes the trade list fail, as it might during an outage.
 func (b *Binance) SetTradesDown(v bool) { b.mu.Lock(); b.tradesDown = v; b.mu.Unlock() }
 
-// SetFeeAsset charges fees in BNB, as with Binance's BNB fee discount.
+// SetFeeAsset charges fees in BNB, as with Binance's BNB fee discount, or
+// none at all, as on the testnet.
 func (b *Binance) SetFeeAsset(asset string) { b.mu.Lock(); b.feeAsset = asset; b.mu.Unlock() }
 
 func (b *Binance) SetBalance(asset string, v num.Dec) {
@@ -203,7 +216,7 @@ func (b *Binance) serve(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal([]byte(q.Get("symbols")), &symbols)
 		var out []map[string]string
 		for _, s := range symbols {
-			out = append(out, map[string]string{"symbol": s, "price": fmt.Sprintf("%.8f", b.price(s, now))})
+			out = append(out, map[string]string{"symbol": s, "price": fmt.Sprintf("%.8f", b.venue(s, now))})
 		}
 		writeJSON(w, out)
 	case "/api/v3/exchangeInfo":
@@ -305,7 +318,7 @@ func (b *Binance) order(w http.ResponseWriter, q url.Values, now time.Time) {
 		apiError(w, 400, -1013, "Filter failure: NOTIONAL")
 		return
 	}
-	price, err := num.FromFloat(b.price(symbol, now))
+	price, err := num.FromFloat(b.venue(symbol, now))
 	if err != nil || q.Get("type") != "MARKET" {
 		apiError(w, 400, -1013, "invalid order")
 		return
@@ -342,6 +355,9 @@ func (b *Binance) order(w http.ResponseWriter, q url.Values, now time.Time) {
 	if o.Quote.Less(num.Int(5)) && o.Status == "FILLED" {
 		apiError(w, 400, -1013, "Filter failure: NOTIONAL")
 		return
+	}
+	if b.feeAsset == "none" {
+		o.Fee = num.Dec{}
 	}
 	if b.feeAsset == "BNB" {
 		bnb, _ := num.FromFloat(b.price("BNBUSDT", now))

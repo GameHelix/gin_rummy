@@ -63,8 +63,9 @@ func TestTestnetRoundTrip(t *testing.T) {
 	if len(e.st.Pending) != 0 || len(e.st.Trades) != 2 || e.st.Halted != "" {
 		t.Fatalf("pending %v, trades %d, halted %q", e.st.Pending, len(e.st.Trades), e.st.Halted)
 	}
-	// What moved on the exchange is exactly what the ledger booked.
-	for asset, booked := range map[string]num.Dec{"USDT": e.st.Ledger.Cash.Sub(num.Int(100)), "BTC": e.st.Ledger.Holdings["BTCUSDT"]} {
+	// What moved on the exchange is exactly what the ledger booked, apart from
+	// the live fee the testnet does not charge but the ledger pays on paper.
+	for asset, booked := range map[string]num.Dec{"USDT": e.st.Ledger.Cash.Add(e.st.Ledger.FeesUSD).Sub(num.Int(100)), "BTC": e.st.Ledger.Holdings["BTCUSDT"]} {
 		if moved := after.Balances[asset].Total().Sub(before.Balances[asset].Total()); moved.Cmp(booked) != 0 {
 			t.Errorf("%s: exchange moved %s, ledger booked %s", asset, moved, booked)
 		}

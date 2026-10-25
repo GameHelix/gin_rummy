@@ -182,7 +182,7 @@ func (e *Engine) snapshot(ctx context.Context, id int, trigger string, now time.
 		Headlines:   briefHeadlines(e.headlines, c.NewsItems, strings.TrimPrefix(trigger, newsTrigger)),
 	}
 	for _, s := range c.Symbols {
-		v, err := market.NewView(s, analyst.PriceEvidenceID(s), e.prices[s].Float(), market.Closed(candles[s]["1h"], now), market.Closed(candles[s]["1d"], now))
+		v, err := market.NewView(s, analyst.PriceEvidenceID(s), e.live[s].Float(), market.Closed(candles[s]["1h"], now), market.Closed(candles[s]["1d"], now))
 		if err != nil {
 			return analyst.Input{}, err
 		}
@@ -226,8 +226,8 @@ func (e *Engine) recentCalls(n int) []analyst.Call {
 			call.Ratings[s] = sig.Rating
 		}
 		for s, p := range d.Prices {
-			if p.Sign() > 0 && e.prices[s].Sign() > 0 {
-				call.ChangesSince[s] = round(e.prices[s].Float()/p.Float()-1, 4)
+			if p.Sign() > 0 && e.live[s].Sign() > 0 {
+				call.ChangesSince[s] = round(e.live[s].Float()/p.Float()-1, 4)
 			}
 		}
 		out = append(out, call)

@@ -788,3 +788,35 @@ func TestReportSurvivesZeroEquity(t *testing.T) {
 		t.Fatalf("zero equity must render: %v %q", err, r.Text())
 	}
 }
+
+func TestTestnetFillsPayTheLiveFeeOnPaper(t *testing.T) {
+	r := newRig(t, rate("strong_buy", "hold"))
+	r.ex.SetFeeAsset("none")
+	r.tick()
+	o := r.ex.OrderList()[0]
+	l := r.eng.st.Ledger
+	fee := o.Quote.Mul(simulatedFee)
+	if l.FeesUSD.Cmp(fee) != 0 || l.Holdings["BTCUSDT"].Cmp(o.Qty) != 0 {
+		t.Fatalf("a 0.1%% fee must be booked: fees %s, want %s", l.FeesUSD, fee)
+	}
+	if onExchange := r.ex.Balance("USDT").Sub(num.Int(900)); onExchange.Sub(fee).Cmp(l.Cash) != 0 {
+		t.Fatalf("cash %s, exchange %s: only the paper fee may differ", l.Cash, onExchange)
+	}
+	r.open()
+	if r.eng.st.Halted != "" {
+		t.Fatalf("the paper fee must not look like a missing balance: %q", r.eng.st.Halted)
+	}
+}
+
+func TestAccountIsValuedWhereOrdersFill(t *testing.T) {
+	r := newRig(t, rate("hold", "hold"))
+	r.ex.SetVenuePremium(1.01)
+	r.tick()
+	live := r.ex.Price("BTCUSDT", r.now())
+	if got := r.eng.prices["BTCUSDT"].Float(); got < live*1.009 || got > live*1.011 {
+		t.Fatalf("valuation must use the venue's price: %v vs live %v", got, live)
+	}
+	if got := r.eng.st.Last().Prices["BTCUSDT"].Float(); got != live {
+		t.Fatalf("the model and the scorecard use the live market: %v vs %v", got, live)
+	}
+}
