@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/ismatsamadov/trader/internal/vault"
 )
@@ -22,6 +23,24 @@ func found(err error) error {
 	return err
 }
 
+// ErrExists means the ID or a unique name is already taken.
+var ErrExists = errors.New("already exists")
+
+// ErrKeyInUse means an exchange key or Telegram bot already serves another
+// agent.
+var ErrKeyInUse = errors.New("that key is used by another agent")
+
+func unique(err error) error {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "23505" {
+		if pe.ConstraintName == "agent_credentials_exclusive" {
+			return ErrKeyInUse
+		}
+		return ErrExists
+	}
+	return err
+}
+
 type Tenant struct {
 	ID           uuid.UUID
 	Name         string
@@ -32,7 +51,7 @@ type Tenant struct {
 func (s *Store) CreateTenant(ctx context.Context, t Tenant) error {
 	return s.inTenant(ctx, t.ID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, "insert into tenants (id, name, entitlements) values ($1, $2, $3)", t.ID, t.Name, string(t.Entitlements))
-		return err
+		return unique(err)
 	})
 }
 
@@ -71,10 +90,27 @@ const (
 	StatusStopped = "stopped"
 )
 
-func (s *Store) CreateAgent(ctx context.Context, a AgentRow) error {
+// CreateAgent stores a new, stopped agent with its first config, if given,
+// and its keys by kind: all of it or nothing.
+func (s *Store) CreateAgent(ctx context.Context, a AgentRow, config json.RawMessage, by string, keys map[string]uuid.UUID) error {
 	return s.inTenant(ctx, a.Tenant, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, "insert into agents (id, tenant_id, name, mode) values ($1, $2, $3, $4)", a.ID, a.Tenant, a.Name, a.Mode)
-		return err
+		if _, err := tx.Exec(ctx, "insert into agents (id, tenant_id, name, mode) values ($1, $2, $3, $4)", a.ID, a.Tenant, a.Name, a.Mode); err != nil {
+			return unique(err)
+		}
+		if config != nil {
+			if _, err := tx.Exec(ctx, "insert into agent_versions (agent_id, tenant_id, version, config, created_by) values ($1, $2, 1, $3, $4)", a.ID, a.Tenant, string(config), by); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, "update agents set version = 1 where id = $1", a.ID); err != nil {
+				return err
+			}
+		}
+		for kind, id := range keys {
+			if _, err := tx.Exec(ctx, "insert into agent_credentials (agent_id, tenant_id, kind, credential_id) values ($1, $2, $3, $4)", a.ID, a.Tenant, kind, id); err != nil {
+				return unique(err)
+			}
+		}
+		return nil
 	})
 }
 
@@ -164,7 +200,7 @@ func (s *Store) PutCredential(ctx context.Context, c Credential) error {
 		_, err := tx.Exec(ctx, `insert into credentials (id, tenant_id, kind, label, hint, ciphertext, nonce, wrapped_key, key_nonce, master_version)
 			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, c.ID, c.Tenant, c.Kind, c.Label, c.Hint,
 			c.Sealed.Ciphertext, c.Sealed.Nonce, c.Sealed.WrappedKey, c.Sealed.KeyNonce, c.Sealed.MasterVersion)
-		return err
+		return unique(err)
 	})
 }
 
@@ -230,7 +266,7 @@ func (s *Store) Attach(ctx context.Context, tenant, agent, credential uuid.UUID,
 	return s.inTenant(ctx, tenant, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `insert into agent_credentials (agent_id, tenant_id, kind, credential_id) values ($1, $2, $3, $4)
 			on conflict (agent_id, kind) do update set credential_id = excluded.credential_id`, agent, tenant, kind, credential)
-		return err
+		return unique(err)
 	})
 }
 

@@ -3,7 +3,6 @@ package pg
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -12,34 +11,14 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ismatsamadov/trader/internal/audit"
+	"github.com/ismatsamadov/trader/internal/testkit"
 )
 
-// testDB returns a fresh, migrated database on the server in
-// TEST_DATABASE_URL, or skips the test.
+// testDB returns a fresh, migrated database, or skips the test.
 func testDB(t *testing.T) string {
 	t.Helper()
-	base := os.Getenv("TEST_DATABASE_URL")
-	if base == "" {
-		t.Skip("set TEST_DATABASE_URL to run Postgres tests")
-	}
+	url := testkit.Database(t)
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(ctx)
-	name := "trader_test_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), base)
-		if err == nil {
-			c.Exec(context.Background(), "drop database "+name+" with (force)")
-			c.Close(context.Background())
-		}
-	})
-	url := replaceDB(base, name)
 	if err := Migrate(ctx, url); err != nil {
 		t.Fatal(err)
 	}
@@ -47,15 +26,6 @@ func testDB(t *testing.T) string {
 		t.Fatalf("migrations must be idempotent: %v", err)
 	}
 	return url
-}
-
-func replaceDB(url, name string) string {
-	i := strings.LastIndex(url, "/")
-	rest := ""
-	if q := strings.Index(url[i:], "?"); q >= 0 {
-		rest = url[i+q:]
-	}
-	return url[:i+1] + name + rest
 }
 
 func chain(t *testing.T, dir string, a Agent, n int) []audit.Event {
@@ -154,6 +124,56 @@ func TestEventsAreAppendOnlyAndTenantsIsolated(t *testing.T) {
 	defer owner.Close(ctx)
 	if _, err := owner.Exec(ctx, "update events set type = 'x'"); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("the owner must not edit events: %v", err)
+	}
+}
+
+func TestEventsReadBackInOrderAndAnnounceThemselves(t *testing.T) {
+	url := testDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := Agent{Tenant: uuid.New(), ID: uuid.New(), Name: "btc-eth", Mode: "testnet"}
+	woke := make(chan uuid.UUID, 4)
+	listening := make(chan error, 1)
+	go func() { listening <- s.Listen(ctx, func(id uuid.UUID) { woke <- id }) }()
+	dir := t.TempDir()
+	written := chain(t, dir, a, 5)
+	// The listener may not be subscribed yet; ship until it hears one.
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		if _, err := s.Store(ctx, a, written); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case id := <-woke:
+			if id != a.ID {
+				t.Fatalf("woke for %s", id)
+			}
+		case <-time.After(200 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("no notification")
+			}
+			written = append(written, chain(t, dir, a, 1)...)
+			continue
+		}
+		break
+	}
+	got, err := s.Events(ctx, a.Tenant, a.ID, 2, 2)
+	if err != nil || len(got) != 2 || got[0].Seq != 3 || got[1].Seq != 4 {
+		t.Fatalf("events after 2: %+v %v", got, err)
+	}
+	if string(got[0].Body) != string(written[2].Body) || got[0].Sum() == nil || string(got[0].Sum()) != string(got[0].Hash) {
+		t.Fatalf("an event must read back exactly as hashed: %s", got[0].Body)
+	}
+	if other, _ := s.Events(ctx, uuid.New(), a.ID, 0, 10); len(other) != 0 {
+		t.Fatal("another tenant must not read the events")
+	}
+	cancel()
+	if err := <-listening; err == nil {
+		t.Fatal("Listen returns when its context ends")
 	}
 }
 

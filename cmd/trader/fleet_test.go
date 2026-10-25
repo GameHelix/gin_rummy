@@ -9,9 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-
 	"github.com/ismatsamadov/trader/internal/testkit"
 	"github.com/ismatsamadov/trader/internal/vault"
 )
@@ -20,33 +17,8 @@ import (
 // or skips the test.
 func fleetEnv(t *testing.T) {
 	t.Helper()
-	base := os.Getenv("TEST_DATABASE_URL")
-	if base == "" {
-		t.Skip("set TEST_DATABASE_URL to run fleet command tests")
-	}
-	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(ctx)
-	name := "cli_test_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if c, err := pgx.Connect(context.Background(), base); err == nil {
-			c.Exec(context.Background(), "drop database "+name+" with (force)")
-			c.Close(context.Background())
-		}
-	})
-	i := strings.LastIndex(base, "/")
-	url := base[:i+1] + name
-	if q := strings.Index(base[i:], "?"); q >= 0 {
-		url += base[i+q:]
-	}
 	master, _ := vault.NewMasterKey()
-	t.Setenv("DATABASE_URL", url)
+	t.Setenv("DATABASE_URL", testkit.Database(t))
 	t.Setenv("ENGINE_MASTER_KEY", master)
 }
 

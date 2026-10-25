@@ -45,11 +45,13 @@ const usage = `trader — AI crypto trading agent for Binance spot
   trader budget resolve --attempt ID --cost-usd N --note TEXT
 
 Multi-user engine (needs DATABASE_URL and ENGINE_MASTER_KEY):
-  trader serve            run every active agent (what Docker runs)
+  trader serve            run every active agent (what Docker runs), and the
+                          engine API on ENGINE_API_ADDR (:8080) when
+                          ENGINE_API_TOKEN is set
   trader import           move this standalone agent into the database
   trader tenant add --name NAME --plan FILE
   trader tenant plan --tenant ID --plan FILE
-  trader key add --tenant ID --kind anthropic|binance|telegram [--label TEXT] < key.json
+  trader key add --tenant ID --kind anthropic|binance|telegram [--mode testnet|live] [--label TEXT] < key.json
   trader key list --tenant ID
   trader key revoke --tenant ID --key ID
   trader agent add --tenant ID --name NAME --mode testnet|live --config FILE --keys ID,ID
@@ -246,31 +248,43 @@ func keysFromEnv() (fleet.Keys, error) {
 // buildEngine wires an agent to Binance, the model and Telegram with the
 // given keys.
 func buildEngine(c config.Config, k fleet.Keys, e env, src news.Source, log io.Writer) *agent.Engine {
-	base, data := binance.TestnetURL, binance.DataURL
-	if c.Mode == config.Live {
-		base = binance.LiveURL
-	}
-	if e.BinanceURL != "" {
-		base, data = e.BinanceURL, e.BinanceURL
-	}
-	opts := []option.RequestOption{option.WithAPIKey(k.Anthropic)}
-	if e.APIURL != "" {
-		opts = append(opts, option.WithBaseURL(e.APIURL))
-	}
 	eng := &agent.Engine{
 		Config:   c,
-		Exchange: &binance.Client{HTTP: exchangeClient(e.HTTP), BaseURL: base, DataURL: data, Key: k.BinanceKey, Secret: k.BinanceSecret, Now: e.Now},
+		Exchange: exchange(c.Mode, k, e),
 		// One budget for testnet and live: both spend the same model key.
-		Analyst: &analyst.Analyst{Config: c, Client: anthropic.NewClient(opts...), Log: log,
+		Analyst: &analyst.Analyst{Config: c, Client: modelClient(k.Anthropic, e), Log: log,
 			Budget: &analyst.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: e.Now}},
 		News: src,
 		Now:  e.Now,
 		Log:  log,
 	}
 	if k.TelegramToken != "" {
-		eng.Bot = &telegram.Bot{HTTP: &http.Client{Timeout: 90 * time.Second}, BaseURL: e.TelegramURL, Token: k.TelegramToken, ChatID: k.TelegramChat}
+		eng.Bot = bot(k, e)
 	}
 	return eng
+}
+
+func exchange(mode string, k fleet.Keys, e env) *binance.Client {
+	base, data := binance.TestnetURL, binance.DataURL
+	if mode == config.Live {
+		base = binance.LiveURL
+	}
+	if e.BinanceURL != "" {
+		base, data = e.BinanceURL, e.BinanceURL
+	}
+	return &binance.Client{HTTP: exchangeClient(e.HTTP), BaseURL: base, DataURL: data, Key: k.BinanceKey, Secret: k.BinanceSecret, Now: e.Now}
+}
+
+func modelClient(key string, e env) anthropic.Client {
+	opts := []option.RequestOption{option.WithAPIKey(key)}
+	if e.APIURL != "" {
+		opts = append(opts, option.WithBaseURL(e.APIURL))
+	}
+	return anthropic.NewClient(opts...)
+}
+
+func bot(k fleet.Keys, e env) *telegram.Bot {
+	return &telegram.Bot{HTTP: &http.Client{Timeout: 90 * time.Second}, BaseURL: e.TelegramURL, Token: k.TelegramToken, ChatID: k.TelegramChat}
 }
 
 // exchangeClient never follows redirects, so the API key header cannot be

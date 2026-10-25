@@ -1,12 +1,15 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,6 +25,7 @@ import (
 	"github.com/ismatsamadov/trader/internal/fleet"
 	"github.com/ismatsamadov/trader/internal/news"
 	"github.com/ismatsamadov/trader/internal/pg"
+	"github.com/ismatsamadov/trader/internal/server"
 	"github.com/ismatsamadov/trader/internal/store"
 	"github.com/ismatsamadov/trader/internal/vault"
 )
@@ -32,7 +36,7 @@ var fleetFlags = map[string][]string{
 	"serve": {"config"}, "import": {"config"},
 	"tenant add":   {"config", "name", "plan"},
 	"tenant plan":  {"config", "tenant", "plan"},
-	"key add":      {"config", "tenant", "kind", "label"},
+	"key add":      {"config", "tenant", "kind", "label", "mode"},
 	"key list":     {"config", "tenant"},
 	"key revoke":   {"config", "tenant", "key"},
 	"agent add":    {"config", "tenant", "name", "mode", "keys"},
@@ -117,9 +121,9 @@ func runFleet(ctx context.Context, args []string, out io.Writer, e env) error {
 		if err := readJSON(*planPath, &en); err != nil {
 			return err
 		}
-		id, err := svc.AddTenant(ctx, *name, en)
+		t, _, err := svc.AddTenant(ctx, uuid.Nil, *name, en)
 		if err == nil {
-			fmt.Fprintf(out, "tenant %s\n", id)
+			fmt.Fprintf(out, "tenant %s\n", t.ID)
 		}
 		return err
 	case "tenant plan":
@@ -175,7 +179,7 @@ func runFleet(ctx context.Context, args []string, out io.Writer, e env) error {
 		if err != nil {
 			return err
 		}
-		c, err := svc.AddKey(ctx, t[0], *kind, *label, raw)
+		c, _, err := svc.AddKey(ctx, t[0], fleet.NewKey{Kind: *kind, Label: *label, Mode: *mode, Secret: raw})
 		clear(raw)
 		if err == nil {
 			fmt.Fprintf(out, "key %s (%s %s)\n", c.ID, c.Kind, c.Hint)
@@ -190,10 +194,7 @@ func runFleet(ctx context.Context, args []string, out io.Writer, e env) error {
 		if err != nil {
 			return err
 		}
-		id, err := svc.AddAgent(ctx, t[0], *name, *mode, raw, "cli")
-		if err != nil {
-			return err
-		}
+		var kids []uuid.UUID
 		for _, k := range strings.Split(*keys, ",") {
 			if k = strings.TrimSpace(k); k == "" {
 				continue
@@ -202,11 +203,13 @@ func runFleet(ctx context.Context, args []string, out io.Writer, e env) error {
 			if err != nil {
 				return fmt.Errorf("--keys: %q is not an ID", k)
 			}
-			if err := svc.AttachKey(ctx, t[0], id, kid); err != nil {
-				return err
-			}
+			kids = append(kids, kid)
 		}
-		fmt.Fprintf(out, "agent %s (stopped; start it with `trader agent start`)\n", id)
+		row, _, err := svc.AddAgent(ctx, t[0], fleet.NewAgent{Name: *name, Mode: *mode, Config: raw, Keys: kids, By: "cli"})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "agent %s (stopped; start it with `trader agent start`)\n", row.ID)
 		return nil
 	case "agent config":
 		ta, err := ids("tenant", "agent")
@@ -284,8 +287,50 @@ func openFleet(ctx context.Context, defaults config.Config, e env) (*fleet.Servi
 	if err != nil {
 		return nil, nil, err
 	}
-	svc := &fleet.Service{Store: st, Vault: v, DataDir: defaults.DataDir, Model: defaults.Model, Check: checkSpec(e)}
+	svc := &fleet.Service{Store: st, Vault: v, DataDir: defaults.DataDir, Model: defaults.Model, Check: checkSpec(e), CheckKey: checkKey(e, defaults.Model)}
 	return svc, st.Close, nil
+}
+
+// checkKey tries a key as it is added: a model key must reach the engine's
+// model, an exchange key must read its account where it trades and, live,
+// must not withdraw, and a Telegram bot says hello in its chat.
+func checkKey(e env, model string) func(context.Context, string, string, fleet.Keys) error {
+	return func(ctx context.Context, kind, mode string, k fleet.Keys) error {
+		switch kind {
+		case fleet.KindAnthropic:
+			client := modelClient(k.Anthropic, e)
+			_, err := client.Models.Get(ctx, model, anthropic.ModelGetParams{})
+			var ae *anthropic.Error
+			switch {
+			case errors.As(err, &ae) && ae.StatusCode == http.StatusUnauthorized:
+				return errors.New("the Anthropic key is not valid")
+			case errors.As(err, &ae) && (ae.StatusCode == http.StatusForbidden || ae.StatusCode == http.StatusNotFound):
+				return fmt.Errorf("the Anthropic key cannot use %s", model)
+			case err != nil:
+				return fmt.Errorf("could not check the Anthropic key: %w", err)
+			}
+		case fleet.KindBinance:
+			ex := exchange(mode, k, e)
+			if err := ex.SyncTime(ctx); err != nil {
+				return err
+			}
+			if _, err := ex.Account(ctx); err != nil {
+				return fmt.Errorf("the Binance key cannot read the %s account: %w", mode, err)
+			}
+			if mode == config.Live {
+				p, err := ex.Permissions(ctx)
+				if err == nil && (p.EnableWithdrawals == nil || *p.EnableWithdrawals) {
+					err = errors.New("this Binance key can withdraw funds; create one with withdrawals disabled")
+				}
+				return err
+			}
+		case fleet.KindTelegram:
+			if err := bot(k, e).Send(ctx, "✅ Connected. Your trading agents report here."); err != nil {
+				return fmt.Errorf("the Telegram bot cannot message chat %d: %w", k.TelegramChat, err)
+			}
+		}
+		return nil
+	}
 }
 
 // checkSpec tries an agent's keys, in its own mode, before it starts.
@@ -351,8 +396,38 @@ func serve(ctx context.Context, svc *fleet.Service, e env, out io.Writer) error 
 			pg.Ship(ctx, svc.Store, agent.EventsDir(spec.Config), func() (pg.Agent, bool) { return who, true }, 5*time.Second, logf)
 		},
 	}
+	if err := startAPI(ctx, svc, sup, e, logf); err != nil {
+		return err
+	}
 	logf("engine serving every active agent")
 	return sup.Run(ctx)
+}
+
+// startAPI opens the engine API, for the app, when ENGINE_API_TOKEN is set.
+func startAPI(ctx context.Context, svc *fleet.Service, sup *fleet.Supervisor, e env, logf func(string, ...any)) error {
+	token := os.Getenv("ENGINE_API_TOKEN")
+	if token == "" {
+		logf("engine API off; set ENGINE_API_TOKEN to open it")
+		return nil
+	}
+	if len(token) < 32 {
+		return errors.New("ENGINE_API_TOKEN must be at least 32 characters")
+	}
+	l, err := net.Listen("tcp", cmp.Or(os.Getenv("ENGINE_API_ADDR"), ":8080"))
+	if err != nil {
+		return fmt.Errorf("engine API: %w", err)
+	}
+	srv := &server.Server{Fleet: svc, Agents: sup, Token: token, Logf: logf,
+		Report: func(ctx context.Context, spec fleet.Spec) (agent.Report, error) {
+			return buildEngine(spec.Config, fleet.Keys{}, e, nil, nil).Report(ctx)
+		}}
+	go func() {
+		if err := srv.Serve(ctx, l); err != nil && ctx.Err() == nil {
+			logf("engine API stopped: %v", err)
+		}
+	}()
+	logf("engine API on %s", l.Addr())
+	return nil
 }
 
 // importStandalone moves the agent configured in .env and the config file
@@ -398,7 +473,7 @@ func importStandalone(ctx context.Context, c config.Config, raw []byte, svc *fle
 		if err != nil {
 			return err
 		}
-		key, err := svc.AddKey(ctx, tenant, kind, "imported", s)
+		key, _, err := svc.AddKey(ctx, tenant, fleet.NewKey{Kind: kind, Label: "imported", Mode: c.Mode, Secret: s})
 		clear(s)
 		if err != nil {
 			return err

@@ -164,12 +164,17 @@ func (e *Engine) Report(ctx context.Context) (Report, error) {
 	return BuildReport(e.Config, st, prices, budget, e.now())
 }
 
-func (e *Engine) statusText(ctx context.Context) string {
+// report is the running account at the loop's latest prices.
+func (e *Engine) report(ctx context.Context) (Report, error) {
 	var budget *analyst.BudgetSummary
 	if s, err := e.Analyst.Budget.Summary(ctx); err == nil {
 		budget = &s
 	}
-	r, err := BuildReport(e.Config, e.st, e.prices, budget, e.now())
+	return BuildReport(e.Config, e.st, e.prices, budget, e.now())
+}
+
+func (e *Engine) statusText(ctx context.Context) string {
+	r, err := e.report(ctx)
 	if err != nil {
 		return "⚠️ Status unavailable: " + err.Error()
 	}

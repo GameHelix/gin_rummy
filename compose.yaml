@@ -26,6 +26,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # The engine API, for the app on this machine only.
+    ports:
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro

@@ -2,6 +2,7 @@
 package testkit
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -19,11 +21,46 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ismatsamadov/trader/internal/binance"
 	"github.com/ismatsamadov/trader/internal/config"
 	"github.com/ismatsamadov/trader/internal/num"
 )
+
+// Database creates an empty database on the server in TEST_DATABASE_URL,
+// dropped when the test ends, and returns its URL. Without the variable the
+// test is skipped.
+func Database(t *testing.T) string {
+	t.Helper()
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("set TEST_DATABASE_URL to run Postgres tests")
+	}
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close(ctx)
+	name := "trader_test_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if c, err := pgx.Connect(context.Background(), base); err == nil {
+			c.Exec(context.Background(), "drop database "+name+" with (force)")
+			c.Close(context.Background())
+		}
+	})
+	i := strings.LastIndex(base, "/")
+	url := base[:i+1] + name
+	if q := strings.Index(base[i:], "?"); q >= 0 {
+		url += base[i+q:]
+	}
+	return url
+}
 
 func Config(dir string) config.Config {
 	return config.Config{

@@ -27,11 +27,14 @@ func TestTenantsAgentsVersionsAndKeys(t *testing.T) {
 		}
 	}
 	agent := AgentRow{ID: uuid.New(), Tenant: a.ID, Name: "btc", Mode: "testnet"}
-	if err := s.CreateAgent(ctx, agent); err != nil {
+	if err := s.CreateAgent(ctx, agent, nil, "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateAgent(ctx, AgentRow{ID: uuid.New(), Tenant: a.ID, Name: "btc", Mode: "live"}); err == nil {
-		t.Fatal("agent names are unique per tenant")
+	if err := s.CreateAgent(ctx, AgentRow{ID: uuid.New(), Tenant: a.ID, Name: "btc", Mode: "live"}, nil, "", nil); !errors.Is(err, ErrExists) {
+		t.Fatalf("agent names are unique per tenant: %v", err)
+	}
+	if err := s.CreateTenant(ctx, a); !errors.Is(err, ErrExists) {
+		t.Fatalf("tenant IDs are unique: %v", err)
 	}
 	for i, cfg := range []string{`{"capital_usd":100}`, `{"capital_usd":200}`} {
 		v, err := s.AddVersion(ctx, a.ID, agent.ID, json.RawMessage(cfg), "test")
@@ -68,9 +71,15 @@ func TestTenantsAgentsVersionsAndKeys(t *testing.T) {
 		t.Fatalf("runnable: %+v %v", run, err)
 	}
 	second := AgentRow{ID: uuid.New(), Tenant: a.ID, Name: "eth", Mode: "testnet"}
-	s.CreateAgent(ctx, second)
-	if err := s.Attach(ctx, a.ID, second.ID, id, "binance"); err == nil {
-		t.Fatal("an exchange key serves one agent only")
+	if err := s.CreateAgent(ctx, second, json.RawMessage(`{}`), "test", map[string]uuid.UUID{"binance": id}); !errors.Is(err, ErrKeyInUse) {
+		t.Fatalf("an exchange key serves one agent only: %v", err)
+	}
+	if _, err := s.Agent(ctx, a.ID, second.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("a refused agent is not half created")
+	}
+	s.CreateAgent(ctx, second, nil, "", nil)
+	if err := s.Attach(ctx, a.ID, second.ID, id, "binance"); !errors.Is(err, ErrKeyInUse) {
+		t.Fatalf("an exchange key serves one agent only: %v", err)
 	}
 	c, err := s.Credential(ctx, a.ID, id)
 	if err != nil {

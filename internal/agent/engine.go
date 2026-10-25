@@ -55,6 +55,8 @@ type Engine struct {
 	saved     []byte
 	alerted   map[string]time.Time
 	inbox     chan inbound
+	exit      chan struct{}
+	mailOnce  sync.Once
 	later     []inbound
 	job       *job
 	results   chan result
@@ -64,10 +66,86 @@ type Engine struct {
 	logMu     sync.Mutex
 }
 
+// inbound is a user command, from Telegram or the engine API.
 type inbound struct {
-	cmd      telegram.Command
-	offset   int64
+	name     string
+	source   string
+	sent     time.Time
 	received time.Time
+	offset   int64      // Telegram's next update offset
+	reply    chan Reply // where an engine API caller waits
+}
+
+const (
+	sourceTelegram = "telegram"
+	sourceAPI      = "api"
+)
+
+// Reply answers a user command.
+type Reply struct {
+	OK     bool    // the command took effect
+	Text   string  // the answer, as Telegram shows it
+	Report *Report // for status
+}
+
+// ErrNotRunning means the agent's loop is not running, so it cannot take
+// commands.
+var ErrNotRunning = errors.New("the agent is not running")
+
+// mailbox is where commands wait for the loop. It exists before the loop
+// starts, so commands can queue while the agent opens its account.
+func (e *Engine) mailbox() chan inbound {
+	e.mailOnce.Do(func() {
+		e.inbox, e.exit = make(chan inbound, 16), make(chan struct{})
+	})
+	return e.inbox
+}
+
+// Command runs a command from the engine API in the agent's loop, as a
+// Telegram command runs, and returns the answer. A command that changes
+// something is recorded and announced on Telegram too. Names are those of
+// the Telegram commands: decide, stop, resume and sellall.
+func (e *Engine) Command(ctx context.Context, name string) (Reply, error) {
+	return e.ask(ctx, inbound{name: name, source: sourceAPI, sent: e.now(), received: e.now()})
+}
+
+// Status reports the account as the running loop sees it, without
+// recording or announcing anything.
+func (e *Engine) Status(ctx context.Context) (Report, error) {
+	r, err := e.ask(ctx, inbound{name: "status", source: sourceAPI, sent: e.now(), received: e.now()})
+	if err != nil {
+		return Report{}, err
+	}
+	if r.Report == nil {
+		return Report{}, errors.New(r.Text)
+	}
+	return *r.Report, nil
+}
+
+func (e *Engine) ask(ctx context.Context, in inbound) (Reply, error) {
+	in.reply = make(chan Reply, 1)
+	inbox := e.mailbox()
+	select {
+	case inbox <- in:
+	case <-e.exit:
+		return Reply{}, ErrNotRunning
+	case <-ctx.Done():
+		return Reply{}, ctx.Err()
+	}
+	select {
+	case r := <-in.reply:
+		return r, nil
+	case <-e.exit:
+		// The loop may have answered just before it stopped.
+		select {
+		case r := <-in.reply:
+			return r, nil
+		default:
+			return Reply{}, ErrNotRunning
+		}
+	case <-ctx.Done():
+		return Reply{}, ctx.Err()
+	}
 }
 
 func (e *Engine) now() time.Time {
@@ -113,6 +191,7 @@ func (e *Engine) alert(ctx context.Context, kind, text string) {
 		return
 	}
 	e.alerted[kind] = e.now()
+	e.emit(evAlert, alertRaised{Kind: kind, Message: text})
 	e.notify(ctx, text)
 }
 
@@ -348,9 +427,7 @@ func (e *Engine) open(ctx context.Context) error {
 	if err := e.openEvents(); err != nil {
 		return fmt.Errorf("audit log: %w", err)
 	}
-	if e.inbox == nil {
-		e.inbox = make(chan inbound, 16)
-	}
+	e.mailbox()
 	if e.results == nil {
 		e.results = make(chan result, 1)
 	}
@@ -374,6 +451,8 @@ func (e *Engine) open(ctx context.Context) error {
 // Run trades until ctx is cancelled. Model calls run in the background, so
 // prices, loss limits, sell-offs and commands keep being handled meanwhile.
 func (e *Engine) Run(ctx context.Context) error {
+	e.mailbox()
+	defer close(e.exit)
 	unlock, err := e.lock(ctx)
 	if err != nil {
 		return err
@@ -391,6 +470,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			e.emit(evAgentStopped, agentStopped{Cash: e.st.Ledger.Cash, Holdings: e.st.Ledger.Holdings, Halted: e.st.Halted})
 			e.notify(ctx, "⏹ Stopped.")
 			return e.save()
 		case in := <-e.inbox:
@@ -478,7 +558,7 @@ func (e *Engine) poll(ctx context.Context, offset int64) {
 		offset = next
 		for _, c := range cmds {
 			select {
-			case e.inbox <- inbound{c, next, e.now()}:
+			case e.inbox <- inbound{name: c.Name, source: sourceTelegram, sent: c.Sent, received: e.now(), offset: next}:
 			case <-ctx.Done():
 				return
 			}
@@ -487,17 +567,17 @@ func (e *Engine) poll(ctx context.Context, offset int64) {
 }
 
 const (
-	stopReason    = "you sent /stop; /resume to trade again"
-	sellAllReason = "you sent /sellall; /resume to trade again"
+	stopReason    = "you stopped trading; /resume to trade again"
+	sellAllReason = "you asked to sell everything; /resume to trade again"
 )
 
 // stale reports a command that changes something but was already old when
 // it arrived, because it was sent while the agent was offline. A stop is
 // honoured regardless, and questions such as /status are simply answered.
 func stale(in inbound) bool {
-	switch in.cmd.Name {
+	switch in.name {
 	case "sellall", "decide", "resume":
-		return in.received.Sub(in.cmd.Sent) > 10*time.Minute
+		return in.received.Sub(in.sent) > 10*time.Minute
 	}
 	return false
 }
@@ -510,7 +590,7 @@ func (e *Engine) checkInbox() {
 		select {
 		case in := <-e.inbox:
 			if !stale(in) {
-				switch in.cmd.Name {
+				switch in.name {
 				case "stop":
 					e.st.Halted, e.st.HaltKind = stopReason, haltManual
 					e.emit(evHalted, halted{haltManual, stopReason})
@@ -542,47 +622,78 @@ const helpText = `Commands:
 /sellall – sell everything and stop`
 
 func (e *Engine) handle(ctx context.Context, in inbound) {
-	defer e.saveOrAlert(ctx)
-	e.st.TelegramOffset = max(e.st.TelegramOffset, in.offset)
-	c := in.cmd
-	e.emit(evCommand, commandReceived{Name: c.Name, Source: "telegram", Sent: c.Sent, Received: in.received, Ignored: stale(in)})
-	if stale(in) {
-		e.notify(ctx, fmt.Sprintf("⚠️ Ignored /%s: it was sent at %s while I was offline.", c.Name, c.Sent.Format("Jan 2 15:04 UTC")))
+	if in.source == sourceAPI && in.name == "status" {
+		// A read for the engine API: answered, not recorded or announced.
+		if r, err := e.report(ctx); err != nil {
+			in.reply <- Reply{Text: "Status unavailable: " + err.Error()}
+		} else {
+			in.reply <- Reply{OK: true, Text: r.Text(), Report: &r}
+		}
 		return
 	}
-	switch c.Name {
+	defer e.saveOrAlert(ctx)
+	if in.source == sourceTelegram {
+		e.st.TelegramOffset = max(e.st.TelegramOffset, in.offset)
+	}
+	e.emit(evCommand, commandReceived{Name: in.name, Source: in.source, Sent: in.sent, Received: in.received, Ignored: stale(in)})
+	// answer replies in the chat a Telegram command came from. An engine API
+	// command is answered to its caller, and on Telegram too when it took
+	// effect, so the chat hears of every stop and resume.
+	answer := func(ok bool, text string) {
+		if in.reply != nil {
+			in.reply <- Reply{OK: ok, Text: text}
+			in.reply = nil
+		}
+		if in.source == sourceTelegram || ok {
+			e.notify(ctx, text)
+		}
+	}
+	if stale(in) {
+		answer(false, fmt.Sprintf("⚠️ Ignored /%s: it was sent at %s while I was offline.", in.name, in.sent.Format("Jan 2 15:04 UTC")))
+		return
+	}
+	switch in.name {
 	case "status":
-		e.notify(ctx, e.statusText(ctx))
+		answer(true, e.statusText(ctx))
 	case "stop":
 		if e.st.Halted != stopReason {
 			e.emit(evHalted, halted{haltManual, stopReason})
 		}
 		e.st.Halted, e.st.HaltKind = stopReason, haltManual
-		e.notify(ctx, "🛑 Trading stopped. Holdings are kept; /resume to trade again.")
+		answer(true, "🛑 Trading stopped. Holdings are kept; /resume to trade again.")
 	case "sellall":
 		if e.st.Halted != sellAllReason {
 			e.emit(evHalted, halted{haltManual, sellAllReason})
 		}
 		e.st.Halted, e.st.HaltKind, e.st.Liquidate = sellAllReason, haltManual, true
-		e.notify(ctx, "🛑 Selling everything. Trading stays stopped until /resume.")
+		answer(true, "🛑 Selling everything. Trading stays stopped until /resume.")
 		e.sellAll(ctx)
 	case "resume":
-		e.resume(ctx)
+		if ok, text := e.resume(ctx); text != "" {
+			answer(ok, text)
+		} else if in.reply != nil {
+			// Trading stopped again at once, and that was announced.
+			in.reply <- Reply{Text: "🛑 Still stopped: " + e.st.Halted}
+		}
 	case "decide":
 		switch {
 		case e.job != nil:
-			e.notify(ctx, "⏳ A decision is already running.")
+			answer(false, "⏳ A decision is already running.")
 		case e.st.Halted != "" || e.st.Liquidate:
-			e.notify(ctx, "🛑 Trading is stopped ("+e.st.Halted+"). Send /resume first.")
+			answer(false, "🛑 Trading is stopped ("+e.st.Halted+"). Send /resume first.")
 		default:
-			if err := e.startDecision(ctx, kindManual, "you asked with /decide"); err != nil {
-				e.notify(ctx, "⚠️ Decision failed: "+untrusted(err.Error()))
+			trigger := "you asked with /decide"
+			if in.source == sourceAPI {
+				trigger = "you asked in the app"
+			}
+			if err := e.startDecision(ctx, kindManual, trigger); err != nil {
+				answer(false, "⚠️ Decision failed: "+untrusted(err.Error()))
 				return
 			}
-			e.notify(ctx, "⏳ Thinking. The decision follows in a minute or two.")
+			answer(true, "⏳ Thinking. The decision follows in a minute or two.")
 		}
 	default:
-		e.notify(ctx, helpText)
+		answer(false, helpText)
 	}
 }
 
@@ -609,13 +720,13 @@ func (e *Engine) clearHalt(kind string) {
 // resume is /resume. Every stop ends, but the loss limits keep their
 // baselines unless one fired: after a daily stop the day counts from now,
 // and after a drawdown both limits do. A key or balance that is still wrong
-// stops trading again at once.
-func (e *Engine) resume(ctx context.Context) {
+// stops trading again at once. It returns whether trading is on and what to
+// say, or no text when a new stop was already announced.
+func (e *Engine) resume(ctx context.Context) (bool, string) {
 	if e.Config.Mode == config.Live {
 		if _, err := e.checkKey(ctx); err != nil {
 			e.st.Halted, e.st.HaltKind = err.Error(), haltKey
-			e.notify(ctx, "🛑 Still stopped: "+err.Error())
-			return
+			return false, "🛑 Still stopped: " + err.Error()
 		}
 		e.keyOK = true
 	}
@@ -631,7 +742,8 @@ func (e *Engine) resume(ctx context.Context) {
 	e.sellFails = nil
 	e.emit(evResumed, resumed{By: "user"})
 	e.reconcile(ctx)
-	if e.st.Halted == "" {
-		e.notify(ctx, "▶️ Trading resumed.")
+	if e.st.Halted != "" {
+		return false, ""
 	}
+	return true, "▶️ Trading resumed."
 }

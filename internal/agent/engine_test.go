@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -85,7 +86,6 @@ func newEngine(t *testing.T, c config.Config, r *rig) *Engine {
 
 func (r *rig) open() {
 	r.t.Helper()
-	r.eng.inbox = make(chan inbound, 16)
 	if err := r.eng.open(context.Background()); err != nil {
 		r.t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestRejectedOrderIsReportedAndNotRetried(t *testing.T) {
 
 func TestStopFromTelegramBlocksOrdersOfARunningDecision(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "strong_buy"))
-	r.eng.inbox <- inbound{cmd: telegram.Command{Name: "stop", Sent: r.now()}, offset: 3, received: r.now()}
+	r.eng.inbox <- inbound{name: "stop", source: sourceTelegram, sent: r.now(), offset: 3, received: r.now()}
 	r.tick()
 	r.eng.handleLater(context.Background())
 	if len(r.eng.st.Decisions) != 1 || len(r.ex.OrderList()) != 0 || r.eng.st.HaltKind != haltManual || r.eng.st.TelegramOffset != 3 {
@@ -252,8 +252,8 @@ func TestStopFromTelegramBlocksOrdersOfARunningDecision(t *testing.T) {
 	if r.api.Count() != 1 {
 		t.Fatal("no decisions while stopped")
 	}
-	r.eng.handle(context.Background(), inbound{cmd: telegram.Command{Name: "resume", Sent: r.now()}})
-	r.eng.handle(context.Background(), inbound{cmd: telegram.Command{Name: "status", Sent: r.now()}})
+	r.eng.handle(context.Background(), inbound{name: "resume", source: sourceTelegram, sent: r.now()})
+	r.eng.handle(context.Background(), inbound{name: "status", source: sourceTelegram, sent: r.now()})
 	if r.eng.st.Halted != "" || !r.sent("Trading resumed.") || !r.sent("Account: $100.00") {
 		t.Fatalf("resume or status failed: %q", r.tg.Sent())
 	}
@@ -263,11 +263,11 @@ func TestStaleCommandsAreIgnoredExceptStop(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "hold"))
 	r.tick()
 	old := r.now().Add(-time.Hour)
-	r.eng.handle(context.Background(), inbound{cmd: telegram.Command{Name: "sellall", Sent: old}, received: r.now()})
+	r.eng.handle(context.Background(), inbound{name: "sellall", source: sourceTelegram, sent: old, received: r.now()})
 	if r.eng.st.Halted != "" || len(r.ex.OrderList()) != 1 || !r.sent("Ignored /sellall") {
 		t.Fatal("a sell-all queued while offline must not run")
 	}
-	r.eng.handle(context.Background(), inbound{cmd: telegram.Command{Name: "stop", Sent: old}, received: r.now()})
+	r.eng.handle(context.Background(), inbound{name: "stop", source: sourceTelegram, sent: old, received: r.now()})
 	if r.eng.st.HaltKind != haltManual {
 		t.Fatal("a stop is honoured even late")
 	}
@@ -281,7 +281,7 @@ func TestTelegramPollerDeliversCommands(t *testing.T) {
 	go r.eng.poll(ctx, 0)
 	select {
 	case in := <-r.eng.inbox:
-		if in.cmd.Name != "status" || in.offset != 2 {
+		if in.name != "status" || in.offset != 2 {
 			t.Fatalf("got %+v", in)
 		}
 	case <-time.After(5 * time.Second):
@@ -310,7 +310,7 @@ func TestDrawdownSellsEverythingAndStops(t *testing.T) {
 	if r.api.Count() != 1 {
 		t.Fatal("no decisions after a drawdown stop")
 	}
-	r.eng.handle(context.Background(), inbound{cmd: telegram.Command{Name: "resume", Sent: r.now()}})
+	r.eng.handle(context.Background(), inbound{name: "resume", source: sourceTelegram, sent: r.now()})
 	r.advance(time.Minute)
 	r.tick()
 	if r.eng.st.HaltKind == haltDrawdown || r.api.Count() != 2 {
@@ -482,14 +482,14 @@ func TestSpentBudgetWaitsForTheNextDay(t *testing.T) {
 }
 
 func (r *rig) command(name string) {
-	r.eng.handle(context.Background(), inbound{cmd: telegram.Command{Name: name, Sent: r.now()}, received: r.now()})
+	r.eng.handle(context.Background(), inbound{name: name, source: sourceTelegram, sent: r.now(), received: r.now()})
 	r.eng.handleLater(context.Background())
 }
 
 func TestASecondSellAllNeverSellsTwice(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "strong_buy"))
 	r.tick()
-	r.eng.inbox <- inbound{cmd: telegram.Command{Name: "sellall", Sent: r.now()}, received: r.now()}
+	r.eng.inbox <- inbound{name: "sellall", source: sourceTelegram, sent: r.now(), received: r.now()}
 	r.command("sellall")
 	orders := r.ex.OrderList()
 	ids := map[string]bool{}
@@ -739,6 +739,74 @@ func TestCommandsAreAnsweredWhileTheModelThinks(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEngineAPICommandsRunInTheLoopLikeTelegramOnes(t *testing.T) {
+	r := newRig(t, rate("strong_buy", "hold"))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.eng.Run(ctx) }()
+	for deadline := time.Now().Add(5 * time.Second); len(r.ex.OrderList()) != 1; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no first trade: %q", r.tg.Sent())
+		}
+	}
+	// After one answer the loop has said all it had to say.
+	if _, err := r.eng.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	messages := len(r.tg.Sent())
+	st, err := r.eng.Status(ctx)
+	if err != nil || st.Trades != 1 || st.Halted != "" || len(r.tg.Sent()) != messages {
+		t.Fatalf("status is read quietly: %+v %v", st, err)
+	}
+	for _, step := range []struct {
+		name string
+		ok   bool
+		want string
+	}{
+		{"stop", true, "Trading stopped"},
+		{"decide", false, "Send /resume first"},
+		{"resume", true, "Trading resumed"},
+		{"sellall", true, "Selling everything"},
+	} {
+		got, err := r.eng.Command(ctx, step.name)
+		if err != nil || got.OK != step.ok || !strings.Contains(got.Text, step.want) {
+			t.Fatalf("%s: %+v %v", step.name, got, err)
+		}
+	}
+	// The loop announces before it takes the next command, so once the
+	// last answer is on Telegram the earlier ones are too.
+	if _, err := r.eng.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !r.sent("Trading stopped") || !r.sent("Trading resumed") || !r.sent("Selling everything") || r.sent("Send /resume first") {
+		t.Fatalf("only commands that took effect are announced on Telegram: %q", r.tg.Sent())
+	}
+	if orders := r.ex.OrderList(); len(orders) != 2 || orders[1].Side != "SELL" {
+		t.Fatalf("the sell-off runs at once: %v", orders)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.eng.Command(context.Background(), "stop"); !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("a stopped agent takes no commands: %v", err)
+	}
+	events, err := audit.ReadAfter(EventsDir(r.eng.Config), 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromAPI []string
+	for _, ev := range events {
+		var c commandReceived
+		if ev.Type == evCommand && json.Unmarshal(ev.Body, &c) == nil && c.Source == sourceAPI {
+			fromAPI = append(fromAPI, c.Name)
+		}
+	}
+	if strings.Join(fromAPI, " ") != "stop decide resume sellall" || events[len(events)-1].Type != evAgentStopped {
+		t.Fatalf("commands on record: %v, last event %s", fromAPI, events[len(events)-1].Type)
 	}
 }
 

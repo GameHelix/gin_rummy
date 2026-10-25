@@ -16,6 +16,7 @@ import (
 const (
 	evAccountCreated  = "account.created"
 	evAgentStarted    = "agent.started"
+	evAgentStopped    = "agent.stopped"
 	evDecisionStarted = "decision.started"
 	evModelCall       = "model.call"
 	evDecisionDone    = "decision.finished"
@@ -29,6 +30,7 @@ const (
 	evEquity          = "equity.hourly"
 	evCallGraded      = "call.graded"
 	evNewsAlert       = "news.alert"
+	evAlert           = "alert.raised"
 )
 
 type accountCreated struct {
@@ -46,6 +48,18 @@ type agentStarted struct {
 	Cash     num.Dec            `json:"cash"`
 	Holdings map[string]num.Dec `json:"holdings"`
 	Halted   string             `json:"halted,omitempty"`
+}
+
+type agentStopped struct {
+	Cash     num.Dec            `json:"cash"`
+	Holdings map[string]num.Dec `json:"holdings"`
+	Halted   string             `json:"halted,omitempty"`
+}
+
+// alertRaised is a problem reported to the user, such as missing prices.
+type alertRaised struct {
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
 }
 
 type decisionStarted struct {

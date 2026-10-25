@@ -1,7 +1,6 @@
 // Package fleet runs many agents in one engine. Each tenant brings their own
 // keys, sealed in the vault; each agent runs a versioned config within the
-// limits of its tenant's tier. The engine API will call this package; until
-// then the command line does.
+// limits of its tenant's tier. The engine API and the command line call it.
 package fleet
 
 import (
@@ -11,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -21,6 +21,22 @@ import (
 	"github.com/ismatsamadov/trader/internal/vault"
 )
 
+// Refused is an error the user can fix, such as a config the plan does not
+// allow or a key that does not work. Its message is safe to show them.
+type Refused struct{ Err error }
+
+func (r *Refused) Error() string { return r.Err.Error() }
+func (r *Refused) Unwrap() error { return r.Err }
+
+func refuse(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &Refused{err}
+}
+
+func refusef(format string, args ...any) error { return &Refused{fmt.Errorf(format, args...)} }
+
 // Entitlements are what a tenant's tier allows. The app sets them; the
 // engine enforces them on every config and every start.
 type Entitlements struct {
@@ -30,6 +46,21 @@ type Entitlements struct {
 	MaxEventDecisionsPerDay  int      `json:"max_event_decisions_per_day"`
 	Live                     bool     `json:"live"`
 	Models                   []string `json:"models,omitempty"`
+}
+
+var symbolPattern = regexp.MustCompile(`^[A-Z0-9]{2,20}$`)
+
+// Validate checks a plan before it is stored.
+func (en Entitlements) Validate() error {
+	for _, s := range en.Symbols {
+		if !symbolPattern.MatchString(s) {
+			return fmt.Errorf("%q is not a Binance symbol", s)
+		}
+	}
+	if en.MaxAgents < 0 || en.MinDecisionIntervalHours < 0 || en.MaxEventDecisionsPerDay < 0 {
+		return errors.New("plan limits cannot be negative")
+	}
+	return nil
 }
 
 func (en Entitlements) Check(c config.Config) error {
@@ -106,28 +137,47 @@ func parseSecret(kind string, raw []byte) (secret, string, error) {
 
 // Service manages tenants, keys and agents. Check, when set, tries an
 // agent's keys against Binance and the model before it starts, in the
-// agent's own mode.
+// agent's own mode; CheckKey tries each key as it is added.
 type Service struct {
-	Store   *pg.Store
-	Vault   *vault.Vault
-	DataDir string
-	Model   string
-	Check   func(ctx context.Context, spec Spec) error
+	Store    *pg.Store
+	Vault    *vault.Vault
+	DataDir  string
+	Model    string
+	Check    func(ctx context.Context, spec Spec) error
+	CheckKey func(ctx context.Context, kind, mode string, k Keys) error
 }
 
-func (s *Service) AddTenant(ctx context.Context, name string, en Entitlements) (uuid.UUID, error) {
+// AddTenant creates a tenant, under the given ID or a new one. An ID that
+// is taken returns that tenant unchanged, so a retried request is safe.
+func (s *Service) AddTenant(ctx context.Context, id uuid.UUID, name string, en Entitlements) (pg.Tenant, bool, error) {
+	if strings.TrimSpace(name) == "" {
+		return pg.Tenant{}, false, refusef("a tenant needs a name")
+	}
+	if err := en.Validate(); err != nil {
+		return pg.Tenant{}, false, refuse(err)
+	}
 	raw, err := json.Marshal(en)
 	if err != nil {
-		return uuid.Nil, err
+		return pg.Tenant{}, false, err
 	}
-	id := uuid.Must(uuid.NewV7())
-	return id, s.Store.CreateTenant(ctx, pg.Tenant{ID: id, Name: name, Entitlements: raw})
+	if id == uuid.Nil {
+		id = uuid.Must(uuid.NewV7())
+	}
+	err = s.Store.CreateTenant(ctx, pg.Tenant{ID: id, Name: name, Entitlements: raw})
+	if err != nil && !errors.Is(err, pg.ErrExists) {
+		return pg.Tenant{}, false, err
+	}
+	t, terr := s.Store.Tenant(ctx, id)
+	return t, err == nil, terr
 }
 
 // SetEntitlements changes a tenant's plan. Active agents the new plan does
 // not allow stop; when more are active than it allows, the newest stop. It
 // returns why each agent stopped.
 func (s *Service) SetEntitlements(ctx context.Context, tenant uuid.UUID, en Entitlements) (map[uuid.UUID]string, error) {
+	if err := en.Validate(); err != nil {
+		return nil, refuse(err)
+	}
 	raw, err := json.Marshal(en)
 	if err != nil {
 		return nil, err
@@ -167,10 +217,11 @@ func (s *Service) SetEntitlements(ctx context.Context, tenant uuid.UUID, en Enti
 }
 
 func tooMany(en Entitlements) error {
-	return fmt.Errorf("agent limit reached (%d on this plan)", en.MaxAgents)
+	return refusef("agent limit reached (%d on this plan)", en.MaxAgents)
 }
 
-func (s *Service) entitlements(ctx context.Context, tenant uuid.UUID) (Entitlements, error) {
+// Plan is a tenant's current entitlements.
+func (s *Service) Plan(ctx context.Context, tenant uuid.UUID) (Entitlements, error) {
 	t, err := s.Store.Tenant(ctx, tenant)
 	if err != nil {
 		return Entitlements{}, err
@@ -194,26 +245,60 @@ func keysOf(kind string, s secret) Keys {
 	return Keys{TelegramToken: s.Token, TelegramChat: s.ChatID}
 }
 
-// AddKey checks a key, seals it and stores it. The secret is never logged
-// or returned; only its hint is.
-func (s *Service) AddKey(ctx context.Context, tenant uuid.UUID, kind, label string, raw []byte) (pg.Credential, error) {
-	_, hint, err := parseSecret(kind, raw)
+// NewKey is a key to store. ID is optional: a retry with the same ID
+// returns the key stored the first time. Mode says where an exchange key is
+// tried: testnet or live.
+type NewKey struct {
+	ID     uuid.UUID
+	Kind   string
+	Label  string
+	Mode   string
+	Secret []byte
+}
+
+// AddKey checks a key's shape and, with CheckKey set, that it works, then
+// seals and stores it. The secret is never logged or returned; only a hint
+// of its last characters is.
+func (s *Service) AddKey(ctx context.Context, tenant uuid.UUID, k NewKey) (pg.Credential, bool, error) {
+	if k.ID == uuid.Nil {
+		k.ID = uuid.Must(uuid.NewV7())
+	} else if c, err := s.Store.Credential(ctx, tenant, k.ID); !errors.Is(err, pg.ErrNotFound) {
+		return c, false, err
+	}
+	sec, hint, err := parseSecret(k.Kind, k.Secret)
 	if err != nil {
-		return pg.Credential{}, err
+		return pg.Credential{}, false, refuse(err)
 	}
-	c := pg.Credential{ID: uuid.Must(uuid.NewV7()), Tenant: tenant, Kind: kind, Label: label, Hint: hint}
-	if c.Sealed, err = s.Vault.Seal(owner(tenant, c.ID, kind), raw); err != nil {
-		return pg.Credential{}, err
+	if k.Kind == KindBinance && k.Mode != config.Testnet && k.Mode != config.Live {
+		return pg.Credential{}, false, refusef("say whether the Binance key is for testnet or live")
 	}
-	return c, s.Store.PutCredential(ctx, c)
+	if s.CheckKey != nil {
+		if err := s.CheckKey(ctx, k.Kind, k.Mode, keysOf(k.Kind, sec)); err != nil {
+			return pg.Credential{}, false, refuse(err)
+		}
+	}
+	c := pg.Credential{ID: k.ID, Tenant: tenant, Kind: k.Kind, Label: k.Label, Hint: hint}
+	if c.Sealed, err = s.Vault.Seal(owner(tenant, c.ID, k.Kind), k.Secret); err != nil {
+		return pg.Credential{}, false, err
+	}
+	err = s.Store.PutCredential(ctx, c)
+	if err != nil && !errors.Is(err, pg.ErrExists) {
+		return pg.Credential{}, false, err
+	}
+	// After a lost race with a retry, the key stored first is returned.
+	stored, serr := s.Store.Credential(ctx, tenant, k.ID)
+	if errors.Is(serr, pg.ErrNotFound) {
+		serr = pg.ErrExists
+	}
+	return stored, err == nil, serr
 }
 
 // RevokeKey revokes a stored key. Agents that used it restart without it, or
 // stop if it was their Anthropic or Binance key; it returns those that
-// stopped.
+// stopped. Revoking a revoked key does nothing.
 func (s *Service) RevokeKey(ctx context.Context, tenant, key uuid.UUID) ([]uuid.UUID, error) {
 	c, err := s.Store.Credential(ctx, tenant, key)
-	if err != nil {
+	if err != nil || c.Revoked {
 		return nil, err
 	}
 	users, err := s.Store.RevokeCredential(ctx, tenant, key)
@@ -228,40 +313,103 @@ func (s *Service) RevokeKey(ctx context.Context, tenant, key uuid.UUID) ([]uuid.
 	return users, nil
 }
 
+// usable returns a stored key that may be attached to an agent.
+func (s *Service) usable(ctx context.Context, tenant, key uuid.UUID) (pg.Credential, error) {
+	c, err := s.Store.Credential(ctx, tenant, key)
+	switch {
+	case errors.Is(err, pg.ErrNotFound):
+		return c, refusef("key %s does not exist", key)
+	case err != nil:
+		return c, err
+	case c.Revoked:
+		return c, refusef("key %s was revoked", key)
+	}
+	return c, nil
+}
+
 // AttachKey makes an agent use a stored key for that key's kind.
 func (s *Service) AttachKey(ctx context.Context, tenant, agent, credential uuid.UUID) error {
-	c, err := s.Store.Credential(ctx, tenant, credential)
+	c, err := s.usable(ctx, tenant, credential)
 	if err != nil {
 		return err
 	}
-	if c.Revoked {
-		return errors.New("that key was revoked")
+	if _, err := s.Store.Agent(ctx, tenant, agent); err != nil {
+		return err
 	}
-	return s.Store.Attach(ctx, tenant, agent, credential, c.Kind)
+	return inUse(s.Store.Attach(ctx, tenant, agent, credential, c.Kind))
 }
 
-// AddAgent creates a stopped agent with its first config.
-func (s *Service) AddAgent(ctx context.Context, tenant uuid.UUID, name, mode string, raw []byte, by string) (uuid.UUID, error) {
-	en, err := s.entitlements(ctx, tenant)
+func inUse(err error) error {
+	if errors.Is(err, pg.ErrKeyInUse) {
+		return refuse(err)
+	}
+	return err
+}
+
+// NewAgent is an agent to create, stopped, with its first config and its
+// keys. ID is optional: a retry with the same ID returns the agent created
+// the first time.
+type NewAgent struct {
+	ID     uuid.UUID
+	Name   string
+	Mode   string
+	Config []byte
+	Keys   []uuid.UUID
+	By     string
+}
+
+// AddAgent creates a stopped agent with its first config and keys.
+func (s *Service) AddAgent(ctx context.Context, tenant uuid.UUID, a NewAgent) (pg.AgentRow, bool, error) {
+	if a.ID == uuid.Nil {
+		a.ID = uuid.Must(uuid.NewV7())
+	} else if row, err := s.Store.Agent(ctx, tenant, a.ID); !errors.Is(err, pg.ErrNotFound) {
+		return row, false, err
+	}
+	if strings.TrimSpace(a.Name) == "" {
+		return pg.AgentRow{}, false, refusef("an agent needs a name")
+	}
+	if a.Mode != config.Testnet && a.Mode != config.Live {
+		return pg.AgentRow{}, false, refusef("mode must be testnet or live")
+	}
+	en, err := s.Plan(ctx, tenant)
 	if err != nil {
-		return uuid.Nil, err
+		return pg.AgentRow{}, false, err
 	}
 	agents, err := s.Store.Agents(ctx, tenant)
 	if err != nil {
-		return uuid.Nil, err
+		return pg.AgentRow{}, false, err
 	}
 	if len(agents) >= en.MaxAgents {
-		return uuid.Nil, tooMany(en)
+		return pg.AgentRow{}, false, tooMany(en)
 	}
-	row := pg.AgentRow{ID: uuid.Must(uuid.NewV7()), Tenant: tenant, Name: name, Mode: mode}
-	if _, err := s.config(row, en, raw); err != nil {
-		return uuid.Nil, err
+	row := pg.AgentRow{ID: a.ID, Tenant: tenant, Name: a.Name, Mode: a.Mode}
+	if _, err := s.config(row, en, a.Config); err != nil {
+		return pg.AgentRow{}, false, refuse(err)
 	}
-	if err := s.Store.CreateAgent(ctx, row); err != nil {
-		return uuid.Nil, err
+	keys := map[string]uuid.UUID{}
+	for _, id := range a.Keys {
+		c, err := s.usable(ctx, tenant, id)
+		if err != nil {
+			return pg.AgentRow{}, false, err
+		}
+		if _, dup := keys[c.Kind]; dup {
+			return pg.AgentRow{}, false, refusef("an agent uses one %s key", c.Kind)
+		}
+		keys[c.Kind] = id
 	}
-	_, err = s.Store.AddVersion(ctx, tenant, row.ID, raw, by)
-	return row.ID, err
+	err = s.Store.CreateAgent(ctx, row, a.Config, a.By, keys)
+	if errors.Is(err, pg.ErrExists) {
+		// A retry with the same ID may have won the race.
+		if row, err := s.Store.Agent(ctx, tenant, a.ID); err == nil {
+			return row, false, nil
+		}
+		return pg.AgentRow{}, false, refusef("an agent named %q already exists", a.Name)
+	}
+	if err != nil {
+		return pg.AgentRow{}, false, inUse(err)
+	}
+	row, err = s.Store.Agent(ctx, tenant, a.ID)
+	return row, err == nil, err
 }
 
 // SetConfig stores a new config version for an agent. A running agent
@@ -271,12 +419,12 @@ func (s *Service) SetConfig(ctx context.Context, tenant, agent uuid.UUID, raw []
 	if err != nil {
 		return 0, err
 	}
-	en, err := s.entitlements(ctx, tenant)
+	en, err := s.Plan(ctx, tenant)
 	if err != nil {
 		return 0, err
 	}
 	if _, err := s.config(row, en, raw); err != nil {
-		return 0, err
+		return 0, refuse(err)
 	}
 	return s.Store.AddVersion(ctx, tenant, agent, raw, by)
 }
@@ -284,6 +432,14 @@ func (s *Service) SetConfig(ctx context.Context, tenant, agent uuid.UUID, raw []
 // config turns a stored config into the one an agent runs: its own data
 // folder, its mode, and the engine's default model if it names none.
 func (s *Service) config(row pg.AgentRow, en Entitlements, raw []byte) (config.Config, error) {
+	c, err := s.settings(row, raw)
+	if err != nil {
+		return c, err
+	}
+	return c, en.Check(c)
+}
+
+func (s *Service) settings(row pg.AgentRow, raw []byte) (config.Config, error) {
 	c, err := config.Parse(raw, "model", "data_dir")
 	if err != nil {
 		return c, err
@@ -292,10 +448,7 @@ func (s *Service) config(row pg.AgentRow, en Entitlements, raw []byte) (config.C
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = s.Model
 	}
-	if err := c.Validate(); err != nil {
-		return c, err
-	}
-	return c, en.Check(c)
+	return c, c.Validate()
 }
 
 func (s *Service) Start(ctx context.Context, tenant, agent uuid.UUID) error {
@@ -304,9 +457,9 @@ func (s *Service) Start(ctx context.Context, tenant, agent uuid.UUID) error {
 		return err
 	}
 	if spec.Keys.Anthropic == "" || spec.Keys.BinanceKey == "" {
-		return errors.New("attach an Anthropic key and a Binance key first")
+		return refusef("attach an Anthropic key and a Binance key first")
 	}
-	en, err := s.entitlements(ctx, tenant)
+	en, err := s.Plan(ctx, tenant)
 	if err != nil {
 		return err
 	}
@@ -325,7 +478,7 @@ func (s *Service) Start(ctx context.Context, tenant, agent uuid.UUID) error {
 	}
 	if s.Check != nil {
 		if err := s.Check(ctx, spec); err != nil {
-			return err
+			return refuse(err)
 		}
 	}
 	return s.Store.SetStatus(ctx, tenant, agent, pg.StatusActive)
@@ -350,7 +503,7 @@ func (s *Service) Adopt(ctx context.Context, tenant, agent uuid.UUID, name, mode
 		return err
 	}
 	if _, err := s.Store.Agent(ctx, tenant, agent); errors.Is(err, pg.ErrNotFound) {
-		if err := s.Store.CreateAgent(ctx, pg.AgentRow{ID: agent, Tenant: tenant, Name: name, Mode: mode}); err != nil {
+		if err := s.Store.CreateAgent(ctx, pg.AgentRow{ID: agent, Tenant: tenant, Name: name, Mode: mode}, nil, "", nil); err != nil {
 			return err
 		}
 	} else if err != nil {
@@ -377,27 +530,18 @@ type Spec struct {
 // Spec loads an agent's current config, checked against its tenant's tier
 // as it stands now, and decrypts its keys.
 func (s *Service) Spec(ctx context.Context, tenant, agent uuid.UUID) (Spec, error) {
-	row, err := s.Store.Agent(ctx, tenant, agent)
+	spec, row, err := s.load(ctx, tenant, agent)
 	if err != nil {
 		return Spec{}, err
 	}
-	if row.Version == 0 {
-		return Spec{}, errors.New("the agent has no config yet")
-	}
-	raw, err := s.Store.Version(ctx, tenant, agent, row.Version)
+	en, err := s.Plan(ctx, tenant)
 	if err != nil {
 		return Spec{}, err
 	}
-	en, err := s.entitlements(ctx, tenant)
-	if err != nil {
-		return Spec{}, err
+	if err := en.Check(spec.Config); err != nil {
+		return Spec{}, refuse(err)
 	}
-	c, err := s.config(row, en, raw)
-	if err != nil {
-		return Spec{}, err
-	}
-	spec := Spec{Tenant: tenant, Agent: agent, Name: row.Name, Version: row.Version, Config: c}
-	attached, err := s.Store.Attached(ctx, tenant, agent)
+	attached, err := s.Store.Attached(ctx, tenant, row.ID)
 	if err != nil {
 		return Spec{}, err
 	}
@@ -426,4 +570,31 @@ func (s *Service) Spec(ctx context.Context, tenant, agent uuid.UUID) (Spec, erro
 		}
 	}
 	return spec, nil
+}
+
+// Settings is an agent's current config without its keys, for reading its
+// account. Unlike Spec it does not check the plan, so an agent the plan no
+// longer allows can still be looked at.
+func (s *Service) Settings(ctx context.Context, tenant, agent uuid.UUID) (Spec, error) {
+	spec, _, err := s.load(ctx, tenant, agent)
+	return spec, err
+}
+
+func (s *Service) load(ctx context.Context, tenant, agent uuid.UUID) (Spec, pg.AgentRow, error) {
+	row, err := s.Store.Agent(ctx, tenant, agent)
+	if err != nil {
+		return Spec{}, row, err
+	}
+	if row.Version == 0 {
+		return Spec{}, row, refusef("the agent has no config yet")
+	}
+	raw, err := s.Store.Version(ctx, tenant, agent, row.Version)
+	if err != nil {
+		return Spec{}, row, err
+	}
+	c, err := s.settings(row, raw)
+	if err != nil {
+		return Spec{}, row, refuse(err)
+	}
+	return Spec{Tenant: tenant, Agent: agent, Name: row.Name, Version: row.Version, Config: c}, row, nil
 }

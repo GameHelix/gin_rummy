@@ -7,12 +7,14 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,7 +30,10 @@ var migrations embed.FS
 // Store runs every query as trader_app, so row-level security and the
 // append-only rules apply even when the connecting user owns the schema.
 type Store struct {
-	pool   *pgxpool.Pool
+	pool *pgxpool.Pool
+	// months caches the event partitions known to exist; every agent's
+	// shipper uses it.
+	mu     sync.Mutex
 	months map[string]bool
 }
 
@@ -164,8 +169,7 @@ func (s *Store) Store(ctx context.Context, a Agent, events []audit.Event) (int, 
 			if e.Tenant != a.Tenant || e.Agent != a.ID || !e.Follows(seq, hash) {
 				return fmt.Errorf("%w: event %d after %d", ErrChain, e.Seq, seq)
 			}
-			month := e.At.UTC().Format("2006-01")
-			if !s.months[month] {
+			if !s.hasMonth(e.At) {
 				if _, err := tx.Exec(ctx, "select ensure_event_partition($1)", e.At.UTC()); err != nil {
 					return err
 				}
@@ -183,14 +187,77 @@ func (s *Store) Store(ctx context.Context, a Agent, events []audit.Event) (int, 
 		}
 		_, err = tx.Exec(ctx, `insert into streams (agent_id, tenant_id, seq, hash, updated_at) values ($1, $2, $3, $4, now())
 			on conflict (agent_id) do update set seq = excluded.seq, hash = excluded.hash, updated_at = excluded.updated_at`, a.ID, a.Tenant, seq, hash)
+		if err != nil {
+			return err
+		}
+		// Delivered on commit, to whoever streams this agent's events.
+		_, err = tx.Exec(ctx, "select pg_notify($1, $2)", eventsChannel, a.ID.String())
 		return err
 	})
 	if err == nil {
+		s.mu.Lock()
 		for _, e := range events {
 			s.months[e.At.UTC().Format("2006-01")] = true
 		}
+		s.mu.Unlock()
 	}
 	return stored, err
+}
+
+func (s *Store) hasMonth(at time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.months[at.UTC().Format("2006-01")]
+}
+
+const eventsChannel = "agent_events"
+
+// Events returns up to limit of the agent's stored events after seq, in
+// order.
+func (s *Store) Events(ctx context.Context, tenant, agent uuid.UUID, after int64, limit int) ([]audit.Event, error) {
+	var out []audit.Event
+	err := s.inTenant(ctx, tenant, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `select id, seq, type, at, body::text, prev_hash, hash from events
+			where agent_id = $1 and seq > $2 order by seq limit $3`, agent, after, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			e := audit.Event{Tenant: tenant, Agent: agent}
+			var body string
+			if err := rows.Scan(&e.ID, &e.Seq, &e.Type, &e.At, &body, &e.Prev, &e.Hash); err != nil {
+				return err
+			}
+			e.At, e.Body = e.At.UTC(), json.RawMessage(body)
+			out = append(out, e)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// Listen calls fn with an agent's ID whenever new events of that agent are
+// stored, until ctx ends or the connection fails.
+func (s *Store) Listen(ctx context.Context, fn func(agent uuid.UUID)) error {
+	pc, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	conn := pc.Hijack()
+	defer conn.Close(context.WithoutCancel(ctx))
+	if _, err := conn.Exec(ctx, "listen "+eventsChannel); err != nil {
+		return err
+	}
+	for {
+		n, err := conn.WaitForNotification(ctx)
+		if err != nil {
+			return err
+		}
+		if id, err := uuid.Parse(n.Payload); err == nil {
+			fn(id)
+		}
+	}
 }
 
 // Ship copies an agent's local audit log to Postgres every interval until
@@ -212,6 +279,14 @@ func Ship(ctx context.Context, s *Store, dir string, a func() (Agent, bool), eve
 		select {
 		case <-ctx.Done():
 		case <-time.After(wait):
+		}
+	}
+	// One last pass, so the events of a clean stop are stored too.
+	if agent, ok := a(); ok {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if _, err := s.shipOnce(fctx, dir, agent); err != nil {
+			logf("database: %v", err)
 		}
 	}
 }

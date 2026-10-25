@@ -25,6 +25,53 @@ type Supervisor struct {
 	Ship  func(ctx context.Context, spec Spec)
 	Every time.Duration
 	Logf  func(format string, args ...any)
+
+	mu      sync.Mutex
+	engines map[uuid.UUID]*agent.Engine
+}
+
+// engine returns the tenant's agent if it runs here now.
+func (s *Supervisor) engine(tenant, id uuid.UUID) *agent.Engine {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.engines[id]; e != nil && e.TenantID == tenant {
+		return e
+	}
+	return nil
+}
+
+// Running reports whether the agent runs in this engine now.
+func (s *Supervisor) Running(tenant, id uuid.UUID) bool { return s.engine(tenant, id) != nil }
+
+// Command sends a user command to a running agent and returns its answer.
+func (s *Supervisor) Command(ctx context.Context, tenant, id uuid.UUID, name string) (agent.Reply, error) {
+	e := s.engine(tenant, id)
+	if e == nil {
+		return agent.Reply{}, agent.ErrNotRunning
+	}
+	return e.Command(ctx, name)
+}
+
+// Status reports a running agent's account as its loop sees it.
+func (s *Supervisor) Status(ctx context.Context, tenant, id uuid.UUID) (agent.Report, error) {
+	e := s.engine(tenant, id)
+	if e == nil {
+		return agent.Report{}, agent.ErrNotRunning
+	}
+	return e.Status(ctx)
+}
+
+func (s *Supervisor) register(id uuid.UUID, e *agent.Engine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.engines == nil {
+		s.engines = map[uuid.UUID]*agent.Engine{}
+	}
+	if e == nil {
+		delete(s.engines, id)
+		return
+	}
+	s.engines[id] = e
 }
 
 type running struct {
@@ -111,6 +158,8 @@ func (s *Supervisor) runAgent(ctx context.Context, tenant, id uuid.UUID) error {
 			return err
 		}
 	}
+	s.register(id, eng)
+	defer s.register(id, nil)
 	var wg sync.WaitGroup
 	shipCtx, stopShip := context.WithCancel(ctx)
 	if s.Ship != nil {

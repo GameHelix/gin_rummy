@@ -6,7 +6,7 @@ An AI crypto trading agent for Binance spot. It watches BTC and ETH around the c
 
 1. **Binance:** create an API key with spot trading on and withdrawals off, ideally restricted to your IP. For a trial run, use testnet keys from testnet.binance.vision.
 2. **Telegram:** create a bot with @BotFather and send it a message; `trader check` then prints your chat ID. Commands are only accepted from that private chat.
-3. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money. `POSTGRES_PASSWORD` protects the engine's database. `ENGINE_MASTER_KEY` (`openssl rand -base64 32`) encrypts the keys stored there; back it up, because without it they cannot be read.
+3. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money. `POSTGRES_PASSWORD` protects the engine's database. `ENGINE_MASTER_KEY` (`openssl rand -base64 32`) encrypts the keys stored there; back it up, because without it they cannot be read. `ENGINE_API_TOKEN` (`openssl rand -hex 32`) opens the engine API.
 
 ```sh
 mkdir -p data                           # on Linux: sudo chown 65532 data
@@ -31,6 +31,14 @@ trader key list|revoke --tenant ID [--key ID]
 trader agent add --tenant ID --name NAME --keys ID,ID --config config/agent.json
 trader agent start|stop|status --tenant ID --agent ID
 trader agent list --tenant ID
+```
+
+## Engine API
+
+The app's only way in, on `127.0.0.1:8080` with `Authorization: Bearer $ENGINE_API_TOKEN`. It does everything Telegram can (status, decide, stop, resume, sell all) and manages tenants, plans, keys, agents and configs; each agent's audit log comes as history or a live stream. The contract is [api/openapi.yaml](api/openapi.yaml); package `api` is its Go client.
+
+```sh
+curl -H "Authorization: Bearer $ENGINE_API_TOKEN" 127.0.0.1:8080/v1/tenants/ID/agents/ID/status
 ```
 
 ## Rules
