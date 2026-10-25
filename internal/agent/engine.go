@@ -42,14 +42,16 @@ type Engine struct {
 	prices    map[string]num.Dec
 	moves     map[string]float64
 	headlines []news.Item
-	newsQueue []news.Item
 	newsAt    time.Time
-	retryAt   time.Time
 	saved     []byte
 	alerted   map[string]time.Time
 	inbox     chan inbound
 	later     []inbound
-	deciding  bool
+	job       *job
+	results   chan result
+	keyOK     bool
+	keyAt     time.Time
+	sellFails map[string]int
 	logMu     sync.Mutex
 }
 
@@ -75,13 +77,13 @@ func (e *Engine) logf(format string, args ...any) {
 	fmt.Fprintf(e.Log, "%s %s\n", time.Now().UTC().Format("2006-01-02 15:04:05Z"), fmt.Sprintf(format, args...))
 }
 
-// notify sends text to Telegram and the log. Testnet messages are marked so
-// they are never mistaken for real trades.
+// notify sends text to Telegram and the log. On testnet every message starts
+// with 🧪 so it is never mistaken for a real trade.
 func (e *Engine) notify(ctx context.Context, text string) {
 	if e.Config.Mode != config.Live {
-		text = "[testnet] " + text
+		text = "🧪 " + text
 	}
-	e.logf("%s", strings.ReplaceAll(text, "\n", " · "))
+	e.logf("%s", strings.ReplaceAll(text, "\n", " | "))
 	if e.Bot == nil {
 		return
 	}
@@ -123,7 +125,7 @@ func (e *Engine) save() error {
 
 func (e *Engine) saveOrAlert(ctx context.Context) {
 	if err := e.save(); err != nil {
-		e.alert(ctx, "save", "Could not save state: "+err.Error())
+		e.alert(ctx, "save", "⚠️ Could not save state: "+err.Error())
 	}
 }
 
@@ -155,17 +157,49 @@ func (e *Engine) connect(ctx context.Context) error {
 	return nil
 }
 
-// checkKey refuses live keys that can withdraw: the agent only needs to
-// trade. A missing answer counts as a key that can.
+var (
+	errKeyWithdraws = errors.New("this API key can withdraw funds; create one with withdrawals disabled")
+	errKeyNoSpot    = errors.New("this API key cannot trade spot; enable spot trading for it")
+)
+
+// checkKey requires a live key that can trade spot and cannot withdraw. A
+// missing answer about withdrawals counts as a key that can.
 func (e *Engine) checkKey(ctx context.Context) (binance.Permissions, error) {
 	p, err := e.Exchange.Permissions(ctx)
-	if err != nil {
+	switch {
+	case err != nil:
 		return p, fmt.Errorf("could not read the API key's permissions: %w", err)
-	}
-	if p.EnableWithdrawals == nil || *p.EnableWithdrawals {
-		return p, errors.New("this API key can withdraw funds; create one with withdrawals disabled")
+	case p.EnableWithdrawals == nil || *p.EnableWithdrawals:
+		return p, errKeyWithdraws
+	case p.EnableSpotTrading != nil && !*p.EnableSpotTrading:
+		return p, errKeyNoSpot
 	}
 	return p, nil
+}
+
+// verifyKey checks the live key. A key that can withdraw or cannot trade
+// stops trading; a failed lookup only holds orders back until a later check
+// succeeds.
+func (e *Engine) verifyKey(ctx context.Context) {
+	e.keyAt = e.now()
+	p, err := e.checkKey(ctx)
+	switch {
+	case errors.Is(err, errKeyWithdraws) || errors.Is(err, errKeyNoSpot):
+		e.keyOK = false
+		e.halt(ctx, haltKey, err.Error())
+	case err != nil:
+		e.keyOK = false
+		e.alert(ctx, "key", "⚠️ "+err.Error()+". No orders until the check works; retrying every 10 minutes.")
+	default:
+		e.keyOK = true
+		if e.st.HaltKind == haltKey {
+			e.clearHalt(haltKey)
+			e.notify(ctx, "▶️ The API key checks out again; trading resumed.")
+		}
+		if !p.IPRestrict {
+			e.alert(ctx, "ip", "⚠️ This API key has no IP restriction. If it leaks it can trade this account; restrict it to your IP on Binance.")
+		}
+	}
 }
 
 // Init creates the account with capital_usd of the exchange's quote balance
@@ -218,7 +252,7 @@ func (e *Engine) Init(ctx context.Context) (State, error) {
 	now := e.now()
 	st := State{
 		Version: stateVersion, Mode: c.Mode, Name: c.Name, Symbols: c.Symbols, CreatedAt: now, Nonce: nonce.Text(36),
-		Capital: capital, RiskBase: capital, Ledger: Ledger{Cash: capital, Holdings: map[string]num.Dec{}},
+		Capital: capital, RiskBase: capital, TakerFee: acct.Taker, Ledger: Ledger{Cash: capital, Holdings: map[string]num.Dec{}},
 		Benchmark: buyAndHold(c, capital, prices, acct.Taker), Day: now.Format(time.DateOnly), DayEquity: capital, NextID: 1,
 	}
 	return st, saveState(c, st)
@@ -243,20 +277,17 @@ func (e *Engine) open(ctx context.Context) error {
 		return err
 	}
 	e.st, e.saved = st, nil
+	if e.inbox == nil {
+		e.inbox = make(chan inbound, 16)
+	}
+	if e.results == nil {
+		e.results = make(chan result, 1)
+	}
 	if err := e.connect(ctx); err != nil {
 		return err
 	}
 	if e.Config.Mode == config.Live {
-		p, err := e.checkKey(ctx)
-		switch {
-		case err != nil:
-			e.halt(ctx, haltKey, err.Error())
-		case e.st.HaltKind == haltKey:
-			e.clearHalt(haltKey)
-		}
-		if err == nil && !p.IPRestrict {
-			e.notify(ctx, "Warning: this API key has no IP restriction. If it leaks it can trade this account; restrict it to your IP on Binance.")
-		}
+		e.verifyKey(ctx)
 	}
 	if len(e.st.Pending) > 0 {
 		e.recover(ctx)
@@ -266,7 +297,8 @@ func (e *Engine) open(ctx context.Context) error {
 	return e.save()
 }
 
-// Run trades until ctx is cancelled.
+// Run trades until ctx is cancelled. Model calls run in the background, so
+// prices, loss limits, sell-offs and commands keep being handled meanwhile.
 func (e *Engine) Run(ctx context.Context) error {
 	unlock, err := e.lock(ctx)
 	if err != nil {
@@ -276,27 +308,27 @@ func (e *Engine) Run(ctx context.Context) error {
 	if err := e.open(ctx); err != nil {
 		return err
 	}
-	e.inbox = make(chan inbound, 16)
 	if e.Bot != nil {
 		go e.poll(ctx, e.st.TelegramOffset)
 	}
 	e.notify(ctx, e.startText())
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
-		e.tick(ctx)
-		e.handleLater(ctx)
-		e.saveOrAlert(ctx)
-		timer := time.NewTimer(time.Duration(e.Config.PollSeconds) * time.Second)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-			e.notify(ctx, "Stopped.")
+			e.notify(ctx, "⏹ Stopped.")
 			return e.save()
 		case in := <-e.inbox:
-			timer.Stop()
 			e.handle(ctx, in)
-			e.handleLater(ctx)
+		case r := <-e.results:
+			e.finish(ctx, r)
 		case <-timer.C:
+			e.tick(ctx)
+			timer.Reset(time.Duration(e.Config.PollSeconds) * time.Second)
 		}
+		e.handleLater(ctx)
+		e.saveOrAlert(ctx)
 	}
 }
 
@@ -318,7 +350,15 @@ func (e *Engine) DecideOnce(ctx context.Context) (*Decision, error) {
 		return nil, fmt.Errorf("trading is stopped: %s", e.st.Halted)
 	}
 	e.readNews(ctx, e.now())
-	err = e.decide(ctx, "requested from the command line")
+	if err := e.startDecision(ctx, kindManual, "requested from the command line"); err != nil {
+		return nil, err
+	}
+	select {
+	case r := <-e.results:
+		err = e.finish(ctx, r)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	if serr := e.save(); err == nil {
 		err = serr
 	}
@@ -373,8 +413,8 @@ func (e *Engine) poll(ctx context.Context, offset int64) {
 }
 
 const (
-	stopReason    = "stopped from Telegram; /resume to trade again"
-	sellAllReason = "sell-all from Telegram; /resume to trade again"
+	stopReason    = "you sent /stop; /resume to trade again"
+	sellAllReason = "you sent /sellall; /resume to trade again"
 )
 
 // stale reports a command that changes something but was already old when
@@ -418,18 +458,19 @@ func (e *Engine) handleLater(ctx context.Context) {
 	}
 }
 
-const helpText = `/status  account, positions and last decision
-/decide  make a decision now
-/stop    stop trading, keep positions
-/resume  trade again
-/sellall sell everything and stop`
+const helpText = `Commands:
+/status – account, holdings and the last decision
+/decide – make a decision now (costs a model call)
+/stop – stop trading, keep what is held
+/resume – trade again
+/sellall – sell everything and stop`
 
 func (e *Engine) handle(ctx context.Context, in inbound) {
 	defer e.saveOrAlert(ctx)
 	e.st.TelegramOffset = max(e.st.TelegramOffset, in.offset)
 	c := in.cmd
 	if stale(in) {
-		e.notify(ctx, fmt.Sprintf("Ignored /%s sent at %s while I was offline.", c.Name, c.Sent.Format("Jan 2 15:04 UTC")))
+		e.notify(ctx, fmt.Sprintf("⚠️ Ignored /%s: it was sent at %s while I was offline.", c.Name, c.Sent.Format("Jan 2 15:04 UTC")))
 		return
 	}
 	switch c.Name {
@@ -437,31 +478,25 @@ func (e *Engine) handle(ctx context.Context, in inbound) {
 		e.notify(ctx, e.statusText(ctx))
 	case "stop":
 		e.st.Halted, e.st.HaltKind = stopReason, haltManual
-		e.notify(ctx, "Trading stopped: "+stopReason)
+		e.notify(ctx, "🛑 Trading stopped. Holdings are kept; /resume to trade again.")
 	case "sellall":
 		e.st.Halted, e.st.HaltKind, e.st.Liquidate = sellAllReason, haltManual, true
-		e.notify(ctx, "Selling everything; trading stays stopped until /resume.")
+		e.notify(ctx, "🛑 Selling everything. Trading stays stopped until /resume.")
 		e.sellAll(ctx)
 	case "resume":
-		if e.Config.Mode == config.Live {
-			if _, err := e.checkKey(ctx); err != nil {
-				e.st.Halted, e.st.HaltKind = err.Error(), haltKey
-				e.notify(ctx, "Still stopped: "+err.Error())
-				return
-			}
-		}
-		e.resumeAll()
-		e.notify(ctx, "Trading resumed.")
+		e.resume(ctx)
 	case "decide":
 		switch {
-		case e.deciding:
-			e.notify(ctx, "A decision is already running.")
+		case e.job != nil:
+			e.notify(ctx, "⏳ A decision is already running.")
 		case e.st.Halted != "" || e.st.Liquidate:
-			e.notify(ctx, "Trading is stopped ("+e.st.Halted+").")
+			e.notify(ctx, "🛑 Trading is stopped ("+e.st.Halted+"). Send /resume first.")
 		default:
-			if err := e.decide(ctx, "requested from Telegram"); err != nil {
-				e.notify(ctx, "Decision failed: "+untrusted(err.Error()))
+			if err := e.startDecision(ctx, kindManual, "you asked with /decide"); err != nil {
+				e.notify(ctx, "⚠️ Decision failed: "+untrusted(err.Error()))
+				return
 			}
+			e.notify(ctx, "⏳ Thinking. The decision follows in a minute or two.")
 		}
 	default:
 		e.notify(ctx, helpText)
@@ -476,7 +511,7 @@ func (e *Engine) halt(ctx context.Context, kind, reason string) {
 		return
 	}
 	e.st.Halted, e.st.HaltKind = reason, kind
-	e.notify(ctx, "Trading stopped: "+reason)
+	e.notify(ctx, "🛑 Trading stopped: "+reason)
 }
 
 // clearHalt ends an automatic stop of the given kind only.
@@ -486,11 +521,31 @@ func (e *Engine) clearHalt(kind string) {
 	}
 }
 
-// resumeAll is /resume: every stop ends and the loss limits count from now,
-// or the same losses would stop trading again at once.
-func (e *Engine) resumeAll() {
+// resume is /resume. Every stop ends, but the loss limits keep their
+// baselines unless one fired: after a daily stop the day counts from now,
+// and after a drawdown both limits do. A key or balance that is still wrong
+// stops trading again at once.
+func (e *Engine) resume(ctx context.Context) {
+	if e.Config.Mode == config.Live {
+		if _, err := e.checkKey(ctx); err != nil {
+			e.st.Halted, e.st.HaltKind = err.Error(), haltKey
+			e.notify(ctx, "🛑 Still stopped: "+err.Error())
+			return
+		}
+		e.keyOK = true
+	}
 	if equity, err := e.st.Ledger.Equity(e.prices); err == nil {
-		e.st.DayEquity, e.st.RiskBase = equity, equity
+		if e.st.HaltKind == haltDaily || e.st.DrawdownHit {
+			e.st.DayEquity = equity
+		}
+		if e.st.DrawdownHit {
+			e.st.RiskBase = equity
+		}
 	}
 	e.st.Halted, e.st.HaltKind, e.st.Liquidate, e.st.DrawdownHit = "", "", false, false
+	e.sellFails = nil
+	e.reconcile(ctx)
+	if e.st.Halted == "" {
+		e.notify(ctx, "▶️ Trading resumed.")
+	}
 }

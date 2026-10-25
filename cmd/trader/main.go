@@ -155,6 +155,9 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 			printBriefing(out, b)
 			return nil
 		}
+		if err := modelAvailable(ctx, eng, c); err != nil {
+			return err
+		}
 		d, err := eng.DecideOnce(ctx)
 		if err != nil {
 			return err
@@ -178,7 +181,7 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		}
 		return writeJSON(out, summary)
 	case "budget resolve":
-		if *attempt == "" || *cost < 0 {
+		if *attempt == "" || *cost < 0 || strings.TrimSpace(*note) == "" {
 			return errors.New("budget resolve needs --attempt, --cost-usd and --note")
 		}
 		if err := budget.Resolve(ctx, *attempt, *cost, *note); err != nil {

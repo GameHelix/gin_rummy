@@ -120,6 +120,11 @@ func (c Config) Validate() error {
 	if c.RebalanceBand < 0 || c.RebalanceBand > 0.5 || c.MinTradeUSD < 0 || c.MinTradeUSD > c.CapitalUSD {
 		return errors.New("rebalance_band must be in [0,0.5] and min_trade_usd within capital")
 	}
+	// A buy targets half a position; it must clear min_trade_usd and the
+	// exchange's minimum order (about $5 for these pairs) or nothing trades.
+	if c.CapitalUSD*c.MaxPositionWeight/2 < math.Max(c.MinTradeUSD, 6) {
+		return errors.New("with this capital_usd and max_position_weight a buy rating could never place an order; raise one of them or lower min_trade_usd")
+	}
 	if c.DecisionIntervalHours < 0.25 || c.DecisionIntervalHours > 168 {
 		return errors.New("decision_interval_hours must be 0.25–168")
 	}
@@ -211,10 +216,17 @@ func LoadEnv(path string) error {
 			return fmt.Errorf("%s is set twice in %s", key, path)
 		}
 		seen[key] = true
-		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
-			value = value[1 : len(value)-1]
-		} else if i := strings.Index(value, " #"); i >= 0 {
-			value = strings.TrimSpace(value[:i])
+		if value != "" && (value[0] == '\'' || value[0] == '"') {
+			end := strings.IndexByte(value[1:], value[0])
+			if end < 0 {
+				return fmt.Errorf("unterminated quote on line %d", i+1)
+			}
+			if rest := strings.TrimSpace(value[end+2:]); rest != "" && !strings.HasPrefix(rest, "#") {
+				return fmt.Errorf("invalid dotenv assignment on line %d", i+1)
+			}
+			value = value[1 : end+1]
+		} else if cut := strings.Index(value, " #"); cut >= 0 {
+			value = strings.TrimSpace(value[:cut])
 		} else if strings.HasPrefix(value, "#") {
 			value = ""
 		}

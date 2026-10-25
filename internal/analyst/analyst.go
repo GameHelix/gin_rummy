@@ -60,6 +60,7 @@ type Account struct {
 	CashWeight       float64 `json:"cash_weight"`
 	ReturnSinceStart float64 `json:"return_since_start"`
 	BuyAndHoldReturn float64 `json:"buy_and_hold_return_since_start"`
+	FeeRate          float64 `json:"fee_rate_per_trade"`
 	CallsGraded      int     `json:"buy_sell_calls_graded"`
 	CallsRight       int     `json:"buy_sell_calls_right"`
 }
@@ -250,7 +251,7 @@ Rate every symbol on its expected return over the next %d hours relative to hold
 
 Deterministic rules you do not control turn ratings into trades:
 - strong_buy targets %.1f%% of equity, buy targets %.1f%%, hold keeps the current position, and sell or strong_sell sells all of it.
-- At most %.0f%% of equity is invested. Changes under %.0f percentage points or $%.0f are skipped. Each trade pays about 0.1%% in fees.
+- At most %.0f%% of equity is invested. Changes under %.0f percentage points or $%.0f are skipped. Each trade pays the account's fee_rate_per_trade.
 Rate hold when the evidence is weak or mixed: every change costs fees, and noise is not a signal.
 
 Research:

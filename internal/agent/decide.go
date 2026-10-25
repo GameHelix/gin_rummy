@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -16,39 +17,69 @@ import (
 	"github.com/ismatsamadov/trader/internal/store"
 )
 
-// decide asks the analyst for ratings and trades on them. It never runs
-// while an earlier order is unresolved, saves the decision before any order
-// is sent, and re-checks the loss limits at fresh prices before trading.
-func (e *Engine) decide(ctx context.Context, trigger string) error {
+// job is a decision waiting for the model.
+type job struct {
+	id      int
+	kind    string
+	trigger string
+	started time.Time
+	in      analyst.Input
+	dir     string
+}
+
+type result struct {
+	job *job
+	res analyst.Result
+	err error
+}
+
+// startDecision snapshots the market and starts the analysis in the
+// background. It never starts while an earlier order is unresolved.
+func (e *Engine) startDecision(ctx context.Context, kind, trigger string) error {
+	if e.job != nil {
+		return errors.New("a decision is already running")
+	}
 	if len(e.st.Pending) > 0 {
 		e.recover(ctx)
 		if len(e.st.Pending) > 0 {
 			return errors.New("an earlier order is still being checked; deciding once it settles")
 		}
 	}
-	c := e.Config
-	e.deciding = true
-	defer func() { e.deciding = false }()
 	now := e.now()
 	id := e.st.NextID
-	dir := filepath.Join(c.Dir(), "decisions", strconv.Itoa(id))
+	dir := filepath.Join(e.Config.Dir(), "decisions", strconv.Itoa(id))
 	in, err := e.snapshot(ctx, id, trigger, now, dir)
 	if err != nil {
 		return err
 	}
 	e.st.NextID++
-	e.newsQueue = nil
+	e.st.NewsQueue = nil
 	if err := e.save(); err != nil {
 		return err
 	}
+	j := &job{id: id, kind: kind, trigger: trigger, started: now, in: in, dir: dir}
+	e.job = j
 	actx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-	res, err := e.Analyst.Analyze(actx, in)
-	cancel()
-	if err != nil {
-		return err
+	go func() {
+		defer cancel()
+		res, err := e.Analyst.Analyze(actx, j.in)
+		e.results <- result{j, res, err}
+	}()
+	return nil
+}
+
+// finish records a finished analysis and trades on it if the loss limits
+// still allow it at current prices. The decision is saved before any order
+// is sent.
+func (e *Engine) finish(ctx context.Context, r result) error {
+	e.job = nil
+	if r.err != nil {
+		e.failed(ctx, e.now(), r.err)
+		return r.err
 	}
-	d := Decision{ID: id, Time: now, Trigger: trigger, Summary: res.Summary, Signals: res.Signals, Prices: map[string]num.Dec{}, CostUSD: res.CostUSD, Abstained: res.Abstained}
-	for _, v := range in.Briefing.Coins {
+	c, res := e.Config, r.res
+	d := Decision{ID: r.job.id, Time: r.job.started, Kind: r.job.kind, Trigger: r.job.trigger, Summary: res.Summary, Signals: res.Signals, Prices: map[string]num.Dec{}, CostUSD: res.CostUSD, Abstained: res.Abstained}
+	for _, v := range r.job.in.Briefing.Coins {
 		d.Prices[v.Symbol], _ = num.FromFloat(v.Price)
 	}
 	e.st.Decisions = keep(append(e.st.Decisions, d), 100)
@@ -56,29 +87,60 @@ func (e *Engine) decide(ctx context.Context, trigger string) error {
 		horizon := time.Duration(c.ScoreHorizonHours) * time.Hour
 		for _, s := range c.Symbols {
 			if score, _ := res.Signals[s].Rating.Score(); score != 0 {
-				e.st.Open = append(e.st.Open, OpenCall{Decision: id, Symbol: s, Rating: res.Signals[s].Rating, Entry: d.Prices[s], Due: now.Add(horizon)})
+				e.st.Open = append(e.st.Open, OpenCall{Decision: d.ID, Symbol: s, Rating: res.Signals[s].Rating, Entry: d.Prices[s], Due: d.Time.Add(horizon)})
 			}
 		}
 	}
 	if err := e.save(); err != nil {
 		return err
 	}
-	var trades []Trade
+	var plans []Plan
 	note := ""
 	switch {
 	case res.Abstained:
+		note = "No valid ratings, so nothing changes."
 	case e.watch(ctx) != nil:
 		note = "No trades: prices were unavailable after the analysis."
 	case !e.guard(ctx):
 		note = "No trades: trading is stopped (" + e.st.Halted + ")."
 	default:
-		trades = e.rebalance(ctx, id, res.Signals)
+		var err error
+		if plans, err = PlanOrders(c, e.rules, e.st.Ledger, e.prices, res.Signals); err != nil {
+			note = "No trades: " + err.Error()
+		}
 	}
-	e.notify(ctx, e.decisionText(d, trades, note))
-	if err := store.WriteJSON(filepath.Join(dir, "decision.json"), map[string]any{"decision": d, "trades": trades, "note": note}); err != nil {
+	e.notify(ctx, e.decisionText(d, plans, note))
+	var trades []Trade
+	if len(plans) > 0 {
+		trades = e.rebalance(ctx, d.ID, res.Signals)
+	}
+	if err := store.WriteJSON(filepath.Join(r.job.dir, "decision.json"), map[string]any{"decision": d, "trades": trades, "note": note}); err != nil {
 		return err
 	}
+	e.prune()
 	return e.save()
+}
+
+// keepDecisions is how many decision folders stay on disk.
+const keepDecisions = 300
+
+// prune deletes all but the newest decision folders.
+func (e *Engine) prune() {
+	root := filepath.Join(e.Config.Dir(), "decisions")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	var ids []int
+	for _, en := range entries {
+		if id, err := strconv.Atoi(en.Name()); err == nil && en.IsDir() {
+			ids = append(ids, id)
+		}
+	}
+	sort.Ints(ids)
+	for _, id := range ids[:max(0, len(ids)-keepDecisions)] {
+		os.RemoveAll(filepath.Join(root, strconv.Itoa(id)))
+	}
 }
 
 func (e *Engine) snapshot(ctx context.Context, id int, trigger string, now time.Time, dir string) (analyst.Input, error) {
@@ -115,7 +177,7 @@ func (e *Engine) snapshot(ctx context.Context, id int, trigger string, now time.
 	b := analyst.Briefing{
 		DecisionID: "d" + strconv.Itoa(id), DecisionTime: now.Format(time.RFC3339), Trigger: trigger, HorizonHours: c.ScoreHorizonHours,
 		Account: analyst.Account{EquityUSD: round(eq, 2), CashWeight: round(e.st.Ledger.Cash.Float()/eq, 4), ReturnSinceStart: round(eq/capital-1, 4), BuyAndHoldReturn: round(bench.Float()/capital-1, 4),
-			CallsGraded: len(e.st.Scored), CallsRight: right},
+			FeeRate: e.st.TakerFee.Float(), CallsGraded: len(e.st.Scored), CallsRight: right},
 		RecentCalls: e.recentCalls(5),
 		Headlines:   briefHeadlines(e.headlines, c.NewsItems, strings.TrimPrefix(trigger, newsTrigger)),
 	}

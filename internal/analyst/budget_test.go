@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ismatsamadov/trader/internal/store"
 )
 
 func TestBudgetEnforcesDailyAndMonthlyCaps(t *testing.T) {
@@ -94,5 +96,30 @@ func TestConcurrentReservationsRespectTheCap(t *testing.T) {
 	wg.Wait()
 	if granted != 5 {
 		t.Fatalf("exactly five $1 reservations fit a $5 cap, got %d", granted)
+	}
+}
+
+func TestJournalDropsFinishedAttemptsFromBeforeLastMonth(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	b := &Budget{Path: t.TempDir() + "/budget.json", DailyUSD: 5, MonthlyUSD: 50, Now: func() time.Time { return now }}
+	old := now.AddDate(0, -3, 0).Format(time.RFC3339Nano)
+	j := budgetJournal{Version: "budget-v2", Attempts: []BudgetAttempt{
+		{ID: "old-settled", Status: attemptSettled, CreatedAt: old},
+		{ID: "old-open", Status: attemptUncertain, CreatedAt: old, ReservedNanos: 1},
+		{ID: "last-month", Status: attemptSettled, CreatedAt: now.AddDate(0, -1, 0).Format(time.RFC3339Nano)},
+	}}
+	if err := store.WriteJSON(b.Path, j); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Reserve(context.Background(), "d1", "p", 0.01); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := b.load()
+	var ids []string
+	for _, a := range got.Attempts {
+		ids = append(ids, a.ID)
+	}
+	if len(ids) != 3 || ids[0] != "old-open" || ids[1] != "last-month" {
+		t.Fatalf("kept %v", ids)
 	}
 }

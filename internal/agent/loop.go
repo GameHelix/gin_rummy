@@ -9,25 +9,29 @@ import (
 	"time"
 
 	"github.com/ismatsamadov/trader/internal/analyst"
+	"github.com/ismatsamadov/trader/internal/config"
 	"github.com/ismatsamadov/trader/internal/news"
 	"github.com/ismatsamadov/trader/internal/num"
 )
 
 // tick is one pass of the loop: settle orders, refresh prices, record
 // equity, enforce loss limits, keep selling if a sell-off is under way,
-// grade old calls, read news, and decide if something is due.
+// grade old calls, read news, and start a decision if one is due.
 func (e *Engine) tick(ctx context.Context) {
 	now := e.now()
+	if e.Config.Mode == config.Live && !e.keyOK && now.Sub(e.keyAt) >= 10*time.Minute {
+		e.verifyKey(ctx)
+	}
 	if len(e.st.Pending) > 0 {
 		e.recover(ctx)
 	}
 	if err := e.watch(ctx); err != nil {
-		e.alert(ctx, "prices", "Price data unavailable: "+err.Error())
+		e.alert(ctx, "prices", "⚠️ Price data unavailable: "+err.Error())
 		return
 	}
 	equity, err := e.st.Ledger.Equity(e.prices)
 	if err != nil {
-		e.alert(ctx, "equity", err.Error())
+		e.alert(ctx, "equity", "⚠️ "+err.Error())
 		return
 	}
 	e.record(now, equity)
@@ -38,16 +42,23 @@ func (e *Engine) tick(ctx context.Context) {
 	}
 	e.score(ctx, now)
 	e.readNews(ctx, now)
-	if trigger := e.trigger(now); trigger != "" {
-		if err := e.decide(ctx, trigger); err != nil {
-			// A spent budget only resets with the UTC day; other failures retry soon.
-			e.retryAt = now.Add(10 * time.Minute)
-			if errors.Is(err, analyst.ErrBudgetExceeded) {
-				e.retryAt = now.Truncate(24 * time.Hour).Add(24 * time.Hour)
-			}
-			e.alert(ctx, "decide", "Decision skipped: "+untrusted(err.Error()))
+	if kind, trigger := e.trigger(now); trigger != "" {
+		if err := e.startDecision(ctx, kind, trigger); err != nil {
+			e.failed(ctx, now, err)
 		}
 	}
+}
+
+// failed backs off after a decision could not be made. A spent budget only
+// resets with the UTC day, and the message says what that means.
+func (e *Engine) failed(ctx context.Context, now time.Time, err error) {
+	e.st.RetryAt = now.Add(10 * time.Minute)
+	msg := "⚠️ Decision skipped: " + untrusted(err.Error()) + ". Retrying in 10 minutes."
+	if errors.Is(err, analyst.ErrBudgetExceeded) {
+		e.st.RetryAt = now.Truncate(24 * time.Hour).Add(24 * time.Hour)
+		msg = fmt.Sprintf("⚠️ AI budget used up: %v.\nNo new decisions until %s. Holdings are kept and the loss limits still apply; /sellall sells everything.", err, e.st.RetryAt.Format("Jan 2 15:04 UTC"))
+	}
+	e.alert(ctx, "decide", msg)
 }
 
 // watch reads the last hour of one-minute candles for each symbol.
@@ -91,12 +102,13 @@ func (e *Engine) rollover(ctx context.Context, now time.Time, equity num.Dec) {
 	e.st.Day, e.st.DayEquity = day, equity
 	if e.st.HaltKind == haltDaily {
 		e.clearHalt(haltDaily)
-		e.notify(ctx, "New day: trading resumed.")
+		e.notify(ctx, "▶️ New day: trading resumed after yesterday's loss limit.")
 	}
 }
 
-// limits stops trading after a bad day, and starts a sell-off after a deep
-// drawdown from the start (or from the last /resume).
+// limits pauses trading after a bad day and starts a sell-off after a deep
+// drawdown. Under a manual stop nothing is sold: the drawdown is reported
+// and the decision left to the user.
 func (e *Engine) limits(ctx context.Context, equity num.Dec) {
 	c := e.Config
 	floor := func(base num.Dec, pct float64) num.Dec {
@@ -104,11 +116,17 @@ func (e *Engine) limits(ctx context.Context, equity num.Dec) {
 		return base.Mul(f)
 	}
 	if c.MaxDrawdownPct > 0 && !e.st.DrawdownHit && !floor(e.st.RiskBase, c.MaxDrawdownPct).Less(equity) {
-		e.st.DrawdownHit, e.st.Liquidate = true, true
-		e.halt(ctx, haltDrawdown, fmt.Sprintf("equity $%s is %.1f%% below $%s (limit %.0f%%), so everything is being sold; /resume to trade again", equity.Fixed(2), 100*(1-equity.Float()/e.st.RiskBase.Float()), e.st.RiskBase.Fixed(2), c.MaxDrawdownPct))
+		e.st.DrawdownHit = true
+		loss := fmt.Sprintf("equity %s is %.1f%% below %s, past the %.0f%% limit", usd(equity), 100*(1-equity.Float()/e.st.RiskBase.Float()), usd(e.st.RiskBase), c.MaxDrawdownPct)
+		if e.st.HaltKind == haltManual {
+			e.notify(ctx, "⚠️ Loss limit reached: "+loss+". You stopped trading, so nothing is sold; /sellall sells everything.")
+		} else {
+			e.st.Liquidate = true
+			e.halt(ctx, haltDrawdown, loss+", so everything is being sold. /resume to trade again")
+		}
 	}
 	if c.DailyLossLimitPct > 0 && e.st.Halted == "" && !floor(e.st.DayEquity, c.DailyLossLimitPct).Less(equity) {
-		e.halt(ctx, haltDaily, fmt.Sprintf("down %.1f%% today (limit %.0f%%); no new trades until 00:00 UTC", 100*(1-equity.Float()/e.st.DayEquity.Float()), c.DailyLossLimitPct))
+		e.halt(ctx, haltDaily, fmt.Sprintf("down %.1f%% today, past the %.0f%% daily limit. No new trades until 00:00 UTC", 100*(1-equity.Float()/e.st.DayEquity.Float()), c.DailyLossLimitPct))
 	}
 }
 
@@ -118,7 +136,7 @@ func (e *Engine) guard(ctx context.Context) bool {
 	if equity, err := e.st.Ledger.Equity(e.prices); err == nil {
 		e.limits(ctx, equity)
 	}
-	return e.st.Halted == "" && !e.st.Liquidate
+	return e.st.Halted == "" && !e.st.Liquidate && (e.Config.Mode != config.Live || e.keyOK)
 }
 
 // score grades calls whose horizon has passed against the price at Due.
@@ -156,7 +174,7 @@ func (e *Engine) readNews(ctx context.Context, now time.Time) {
 	e.newsAt = now
 	items, err := e.News.Fetch(ctx, now, 72*time.Hour, e.bases())
 	if err != nil {
-		e.alert(ctx, "news", "News feeds unavailable: "+err.Error())
+		e.alert(ctx, "news", "⚠️ News feeds unavailable: "+err.Error())
 		return
 	}
 	e.headlines = items
@@ -180,10 +198,10 @@ func (e *Engine) readNews(ctx context.Context, now time.Time) {
 	if len(alerts) == 0 {
 		return
 	}
-	e.newsQueue = append(e.newsQueue, alerts...)
-	var lines []string
+	e.st.NewsQueue = append(e.st.NewsQueue, alerts...)
+	lines := []string{"📰 Market news"}
 	for _, it := range alerts[:min(3, len(alerts))] {
-		lines = append(lines, fmt.Sprintf("News (%s): %s", it.Source, untrusted(it.Title)))
+		lines = append(lines, fmt.Sprintf("• %s (%s)", untrusted(it.Title), it.Source))
 	}
 	if len(alerts) > 3 {
 		lines = append(lines, fmt.Sprintf("and %d more", len(alerts)-3))
@@ -199,54 +217,62 @@ func (e *Engine) bases() []string {
 	return out
 }
 
+const (
+	kindScheduled = "scheduled"
+	kindMove      = "move"
+	kindNews      = "news"
+	kindManual    = "manual"
+)
+
 const newsTrigger = "headline "
 
-// trigger says why a decision is due now, or "" if none is. Nothing is due
-// while trading is stopped, a sell-off runs or an order is unresolved.
-func (e *Engine) trigger(now time.Time) string {
+// trigger says what kind of decision is due now and why, or "" if none is.
+// Nothing is due while a decision runs, trading is stopped, a sell-off runs
+// or an order is unresolved.
+func (e *Engine) trigger(now time.Time) (string, string) {
 	c := e.Config
-	if e.st.Halted != "" || e.st.Liquidate || len(e.st.Pending) > 0 || now.Before(e.retryAt) {
-		return ""
+	if e.job != nil || e.st.Halted != "" || e.st.Liquidate || len(e.st.Pending) > 0 || now.Before(e.st.RetryAt) || (c.Mode == config.Live && !e.keyOK) {
+		return "", ""
 	}
 	var fresh []news.Item
-	for _, it := range e.newsQueue {
+	for _, it := range e.st.NewsQueue {
 		if now.Sub(it.PublishedAt) < 2*time.Hour {
 			fresh = append(fresh, it)
 		}
 	}
-	e.newsQueue = fresh
+	e.st.NewsQueue = fresh
 	last := e.st.Last()
 	if last == nil || now.Sub(last.Time) >= c.DecisionInterval() {
-		return "scheduled"
+		return kindScheduled, "scheduled check"
 	}
 	if now.Sub(last.Time) < time.Duration(c.EventCooldownMinutes)*time.Minute || e.eventsToday(now) >= c.MaxEventDecisionsPerDay {
-		return ""
+		return "", ""
 	}
 	for _, s := range c.Symbols {
 		if m := e.moves[s]; c.MoveTrigger1HPct > 0 && math.Abs(m)*100 >= c.MoveTrigger1HPct {
-			return fmt.Sprintf("%s moved %+.1f%% in the last hour", s, m*100)
+			return kindMove, fmt.Sprintf("%s moved %+.1f%% in the last hour", c.Base(s), m*100)
 		}
 	}
 	for _, s := range c.Symbols {
 		if p := last.Prices[s]; c.MoveTriggerSinceDecisionPct > 0 && p.Sign() > 0 {
 			if m := e.prices[s].Float()/p.Float() - 1; math.Abs(m)*100 >= c.MoveTriggerSinceDecisionPct {
-				return fmt.Sprintf("%s moved %+.1f%% since the last decision", s, m*100)
+				return kindMove, fmt.Sprintf("%s moved %+.1f%% since the last decision", c.Base(s), m*100)
 			}
 		}
 	}
-	if len(e.newsQueue) > 0 {
+	if len(e.st.NewsQueue) > 0 {
 		// Only the ID: the headline is third-party text and reaches the model
 		// in the briefing's headlines, which are marked as untrusted.
-		return newsTrigger + e.newsQueue[0].ID
+		return kindNews, newsTrigger + e.st.NewsQueue[0].ID
 	}
-	return ""
+	return "", ""
 }
 
 // eventsToday counts today's decisions triggered by moves or news.
 func (e *Engine) eventsToday(now time.Time) int {
 	n := 0
 	for _, d := range e.st.Decisions {
-		if d.Time.Format(time.DateOnly) == now.Format(time.DateOnly) && (strings.Contains(d.Trigger, " moved ") || strings.HasPrefix(d.Trigger, newsTrigger)) {
+		if d.Time.Format(time.DateOnly) == now.Format(time.DateOnly) && (d.Kind == kindMove || d.Kind == kindNews) {
 			n++
 		}
 	}

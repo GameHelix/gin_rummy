@@ -9,6 +9,7 @@ An AI crypto trading agent for Binance spot. It watches BTC and ETH around the c
 3. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money.
 
 ```sh
+mkdir -p data                           # on Linux: sudo chown 65532 data
 docker compose run --rm trader check    # keys, permissions, balance, news, Telegram
 docker compose run --rm trader init     # start with capital_usd (100 USDT)
 docker compose up -d --build            # trade around the clock
@@ -20,13 +21,15 @@ docker compose run --rm trader status
 ## Rules
 
 - **Targets:** `strong_buy` is 45% of equity, `buy` 22.5%, `hold` keeps the position, and `sell` exits. At most 90% is invested, and changes under 5 points or $10 are skipped.
-- **Stops:** a 10% loss in a day pauses trading until 00:00 UTC. A 30% loss from the start sells everything and stops.
+- **Stops:** a 10% loss in a day pauses trading until 00:00 UTC. A 30% loss from the start sells everything and stops; after `/resume` both limits count from that moment. While you have stopped trading yourself, a big loss is reported but nothing is sold.
 - **Triggers:** a decision every 4 hours, plus up to 8 a day on 3% hourly moves or headlines matching alert keywords.
 - **Telegram:** `/status`, `/decide`, `/stop`, `/resume`, `/sellall`.
 - **Safety:**
   - Each order is saved before it is sent. After an unclear reply it is looked up, never resent.
   - Keys that can withdraw are refused.
   - The agent trades only its own capital.
-- **Settings:** everything is in `config/agent.json`.
+- **Settings:** everything is in `config/agent.json`; restart the container after editing it.
+- **Testnet:** decisions use live Binance prices and news, but orders fill on the testnet's own book with test funds and no fees, so its profit and loss is only indicative.
+- **AI spend:** `trader budget status` shows it. If the agent crashes mid-call, that call stays reserved until `trader budget resolve`.
 
 `make check` runs the tests.

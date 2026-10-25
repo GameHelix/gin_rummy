@@ -8,6 +8,7 @@ services:
         required: false
     volumes:
       - ./data:/app/data
+      - ./config:/app/config:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

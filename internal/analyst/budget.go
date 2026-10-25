@@ -120,7 +120,25 @@ func (b *Budget) edit(ctx context.Context, fn func(*budgetJournal) error) error 
 	if err := fn(&j); err != nil {
 		return err
 	}
+	b.compact(&j)
 	return store.WriteJSON(b.Path, j)
+}
+
+// compact drops finished attempts from before last month: the caps only
+// count this month, and open attempts stay until they are resolved.
+func (b *Budget) compact(j *budgetJournal) {
+	now := b.now()
+	cutoff := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
+	kept := j.Attempts[:0]
+	for _, a := range j.Attempts {
+		created, err := time.Parse(time.RFC3339Nano, a.CreatedAt)
+		finished := a.Status == attemptSettled || a.Status == attemptReleased || a.Status == attemptResolved
+		if err == nil && finished && created.Before(cutoff) {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	j.Attempts = kept
 }
 
 func (b *Budget) totals(j budgetJournal) (today, month int64, calls int) {

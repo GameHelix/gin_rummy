@@ -10,6 +10,7 @@ import (
 
 	"github.com/ismatsamadov/trader/internal/analyst"
 	"github.com/ismatsamadov/trader/internal/config"
+	"github.com/ismatsamadov/trader/internal/news"
 	"github.com/ismatsamadov/trader/internal/num"
 	"github.com/ismatsamadov/trader/internal/store"
 )
@@ -75,6 +76,7 @@ type Point struct {
 type Decision struct {
 	ID        int                       `json:"id"`
 	Time      time.Time                 `json:"time"`
+	Kind      string                    `json:"kind,omitempty"`
 	Trigger   string                    `json:"trigger"`
 	Summary   string                    `json:"summary"`
 	Signals   map[string]analyst.Signal `json:"signals"`
@@ -110,6 +112,7 @@ type State struct {
 	OrderSeq       int          `json:"order_seq"`
 	Capital        num.Dec      `json:"capital"`
 	RiskBase       num.Dec      `json:"drawdown_base"`
+	TakerFee       num.Dec      `json:"taker_fee"`
 	Ledger         Ledger       `json:"ledger"`
 	Benchmark      Ledger       `json:"buy_and_hold"`
 	Halted         string       `json:"halted,omitempty"`
@@ -127,6 +130,8 @@ type State struct {
 	Scored         []ScoredCall `json:"scored_calls"`
 	SeenNews       []string     `json:"seen_news"`
 	NewsPrimed     bool         `json:"news_primed"`
+	NewsQueue      []news.Item  `json:"news_queue,omitempty"`
+	RetryAt        time.Time    `json:"retry_at,omitzero"`
 	TelegramOffset int64        `json:"telegram_offset"`
 }
 

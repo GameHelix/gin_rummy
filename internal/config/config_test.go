@@ -44,6 +44,7 @@ func TestConfigRejectsUnsafeOrUnknownSettings(t *testing.T) {
 		"feed without scheme":                func(c *Config) { c.NewsFeeds = []string{"coindesk.com/rss"} },
 		"plain http feed":                    func(c *Config) { c.NewsFeeds = []string{"http://coindesk.com/rss"} },
 		"no mode":                            func(c *Config) { c.Mode = "" },
+		"capital too small to ever buy":      func(c *Config) { c.CapitalUSD, c.MinTradeUSD = 30, 10 },
 		"no data dir":                        func(c *Config) { c.DataDir = " " },
 		"too many samples":                   func(c *Config) { c.Samples = 9 },
 	} {
@@ -103,6 +104,11 @@ func TestDotenvDoesNotEvaluateShellOrOverwriteEnvironment(t *testing.T) {
 	os.WriteFile(path, []byte("TRADER_TEST_D=live # real money\n"), 0o600)
 	if err := LoadEnv(path); err != nil || os.Getenv("TRADER_TEST_D") != "live" {
 		t.Fatalf("inline comments must be dropped like Docker Compose does: %q %v", os.Getenv("TRADER_TEST_D"), err)
+	}
+	os.Unsetenv("TRADER_TEST_D")
+	os.WriteFile(path, []byte(`TRADER_TEST_D="live" # real money`+"\n"), 0o600)
+	if err := LoadEnv(path); err != nil || os.Getenv("TRADER_TEST_D") != "live" {
+		t.Fatalf("a quoted value followed by a comment: %q %v", os.Getenv("TRADER_TEST_D"), err)
 	}
 }
 

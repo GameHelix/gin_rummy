@@ -59,6 +59,8 @@ type Binance struct {
 	Restrictions map[string]any
 	// Fault, when set, decides what happens to the next order request.
 	Fault      string
+	rejecting  string
+	Rejected   int
 	tradesDown bool
 	feeAsset   string
 	path       map[string][]point
@@ -89,6 +91,7 @@ const (
 	FaultDropBefore    = "drop-before"     // never executes, connection dropped
 	FaultReject        = "reject"          // rejected with -2010
 	FaultPartial       = "partial"         // fills half, then expires
+	FaultExpireEmpty   = "expire-empty"    // expires without filling
 )
 
 const Key, Secret = "test-key", "test-secret"
@@ -104,6 +107,11 @@ func NewBinance(now func() time.Time) *Binance {
 }
 
 func (b *Binance) SetFault(f string) { b.mu.Lock(); b.Fault = f; b.mu.Unlock() }
+
+// SetRejecting makes Binance reject every order for symbol until reset.
+func (b *Binance) SetRejecting(symbol string) { b.mu.Lock(); b.rejecting = symbol; b.mu.Unlock() }
+
+func (b *Binance) RejectedCount() int { b.mu.Lock(); defer b.mu.Unlock(); return b.Rejected }
 
 // SetTradesDown makes the trade list fail, as it might during an outage.
 func (b *Binance) SetTradesDown(v bool) { b.mu.Lock(); b.tradesDown = v; b.mu.Unlock() }
@@ -292,12 +300,23 @@ func (b *Binance) order(w http.ResponseWriter, q url.Values, now time.Time) {
 	}
 	symbol, side := q.Get("symbol"), q.Get("side")
 	coin := strings.TrimSuffix(symbol, "USDT")
+	if symbol == b.rejecting {
+		b.Rejected++
+		apiError(w, 400, -1013, "Filter failure: NOTIONAL")
+		return
+	}
 	price, err := num.FromFloat(b.price(symbol, now))
 	if err != nil || q.Get("type") != "MARKET" {
 		apiError(w, 400, -1013, "invalid order")
 		return
 	}
 	o := Order{ID: int64(len(b.Orders) + 1), ClientID: q.Get("newClientOrderId"), Symbol: symbol, Side: side, Price: price, Status: "FILLED", Time: now}
+	if fault == FaultExpireEmpty {
+		o.Status = "EXPIRED"
+		b.Orders = append(b.Orders, o)
+		writeJSON(w, orderJSON(o, false))
+		return
+	}
 	fee := num.MustParse("0.001")
 	if side == "BUY" {
 		quote, err := num.Parse(q.Get("quoteOrderQty"))

@@ -205,14 +205,29 @@ func Tag(items []Item, coins []string) []Item {
 	return items
 }
 
+var (
+	patternsMu sync.Mutex
+	patterns   = map[string]*regexp.Regexp{}
+)
+
 // Mentions reports whether text contains any of the words, ignoring case.
 func Mentions(text string, words []string) bool {
-	for _, w := range words {
-		if regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(w) + `\b`).MatchString(text) {
-			return true
-		}
+	if len(words) == 0 {
+		return false
 	}
-	return false
+	key := strings.Join(words, "\x00")
+	patternsMu.Lock()
+	re, ok := patterns[key]
+	if !ok {
+		quoted := make([]string, len(words))
+		for i, w := range words {
+			quoted[i] = regexp.QuoteMeta(w)
+		}
+		re = regexp.MustCompile(`(?i)\b(?:` + strings.Join(quoted, "|") + `)\b`)
+		patterns[key] = re
+	}
+	patternsMu.Unlock()
+	return re.MatchString(text)
 }
 
 // About returns up to n items mentioning coin, or any items when coin is empty.

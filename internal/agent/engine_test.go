@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -88,7 +90,16 @@ func (r *rig) open() {
 	}
 }
 
-func (r *rig) tick() { r.eng.tick(context.Background()) }
+// tick runs one pass of the loop and, like Run, finishes a decision it
+// started and handles commands that arrived meanwhile.
+func (r *rig) tick() {
+	ctx := context.Background()
+	r.eng.tick(ctx)
+	if r.eng.job != nil {
+		r.eng.finish(ctx, <-r.eng.results)
+	}
+	r.eng.handleLater(ctx)
+}
 
 func (r *rig) sent(substr string) bool {
 	for _, m := range r.tg.Sent() {
@@ -148,7 +159,7 @@ func TestScheduledDecisionTradesOnBinanceAndReports(t *testing.T) {
 	if len(st.Decisions) != 1 || len(st.Trades) != 1 || len(st.Pending) != 0 || len(st.Open) != 1 || st.NextID != 2 || st.Ledger.FeesUSD.Sign() <= 0 {
 		t.Fatalf("state after the decision: %+v", st)
 	}
-	if !r.sent("Decision #1 (scheduled)") || !r.sent("Bought 0.0005") || !r.sent("[testnet]") {
+	if !r.sent("🧠 Decision #1: scheduled check") || !r.sent("Bought 0.0005") || !r.sent("🧪") {
 		t.Fatalf("telegram: %q", r.tg.Sent())
 	}
 	saved, err := LoadState(r.eng.Config)
@@ -173,7 +184,7 @@ func TestSharpMoveTriggersADecisionAfterTheCooldown(t *testing.T) {
 	}
 	r.advance(31 * time.Minute)
 	r.tick()
-	if r.api.Count() != 2 || !strings.HasPrefix(r.eng.st.Last().Trigger, "BTCUSDT moved +4.0% in the last hour") {
+	if r.api.Count() != 2 || !strings.HasPrefix(r.eng.st.Last().Trigger, "BTC moved +4.0% in the last hour") {
 		t.Fatalf("expected a move-triggered decision, got %d calls, trigger %q", r.api.Count(), r.eng.st.Last().Trigger)
 	}
 }
@@ -217,7 +228,7 @@ func TestRejectedOrderIsReportedAndNotRetried(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "hold"))
 	r.ex.SetFault(testkit.FaultReject)
 	r.tick()
-	if len(r.eng.st.Pending) != 0 || len(r.ex.OrderList()) != 0 || !r.sent("BUY BTCUSDT rejected") {
+	if len(r.eng.st.Pending) != 0 || len(r.ex.OrderList()) != 0 || !r.sent("Binance rejected the order to buy BTC") {
 		t.Fatalf("pending %v", r.eng.st.Pending)
 	}
 	r.advance(time.Minute)
@@ -242,7 +253,7 @@ func TestStopFromTelegramBlocksOrdersOfARunningDecision(t *testing.T) {
 	}
 	r.eng.handle(context.Background(), inbound{cmd: telegram.Command{Name: "resume", Sent: r.now()}})
 	r.eng.handle(context.Background(), inbound{cmd: telegram.Command{Name: "status", Sent: r.now()}})
-	if r.eng.st.Halted != "" || !r.sent("Trading resumed.") || !r.sent("equity $100.00") {
+	if r.eng.st.Halted != "" || !r.sent("Trading resumed.") || !r.sent("Account: $100.00") {
 		t.Fatalf("resume or status failed: %q", r.tg.Sent())
 	}
 }
@@ -319,7 +330,7 @@ func TestDailyLossLimitPausesUntilTheNextDay(t *testing.T) {
 	}
 	r.advance(12 * time.Hour)
 	r.tick()
-	if r.eng.st.Halted != "" || !r.sent("Day 2026-10-25 closed") || !r.sent("New day: trading resumed.") {
+	if r.eng.st.Halted != "" || !r.sent("Summary for Sun Oct 25") || !r.sent("New day: trading resumed") {
 		t.Fatalf("the next UTC day resumes trading: %q", r.eng.st.Halted)
 	}
 }
@@ -328,14 +339,14 @@ func TestMajorNewsTriggersADecision(t *testing.T) {
 	r := newRig(t, rate("hold", "hold"))
 	r.headline("Bitcoin ETF approval hopes build", r.now().Add(-3*time.Hour))
 	r.tick()
-	if r.api.Count() != 1 || r.sent("News (") {
+	if r.api.Count() != 1 || r.sent("Market news") {
 		t.Fatal("headlines already out at startup are not alerts")
 	}
 	r.advance(65 * time.Minute)
 	r.headline("Ether developers meet", r.now().Add(-time.Minute))
 	r.headline("Major exchange hack hits Bitcoin holders", r.now().Add(-2*time.Minute))
 	r.tick()
-	if r.api.Count() != 2 || !strings.HasPrefix(r.eng.st.Last().Trigger, "headline news:") || !r.sent("News (") {
+	if r.api.Count() != 2 || !strings.HasPrefix(r.eng.st.Last().Trigger, "headline news:") || !r.sent("Market news") {
 		t.Fatalf("calls %d, trigger %q", r.api.Count(), r.eng.st.Last().Trigger)
 	}
 	r.advance(65 * time.Minute)
@@ -349,7 +360,7 @@ func TestBalanceShortfallStopsTrading(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "hold"))
 	r.ex.SetBalance("USDT", num.Int(40))
 	r.open()
-	if r.eng.st.HaltKind != haltMismatch || !r.sent("Binance holds less than the ledger") {
+	if r.eng.st.HaltKind != haltMismatch || !r.sent("Binance holds less than the agent's books") {
 		t.Fatalf("halt %q", r.eng.st.Halted)
 	}
 	r.tick()
@@ -464,7 +475,7 @@ func TestSpentBudgetWaitsForTheNextDay(t *testing.T) {
 	r.eng.Analyst.Budget.DailyUSD = 5
 	r.advance(30 * time.Minute)
 	r.tick()
-	if r.api.Count() != 1 || !r.sent("Day 2026-10-25 closed") {
+	if r.api.Count() != 1 || !r.sent("Summary for Sun Oct 25") {
 		t.Fatal("the next day decides again")
 	}
 }
@@ -589,7 +600,7 @@ func TestNewsDuringTheCooldownIsKept(t *testing.T) {
 	r.advance(10 * time.Minute)
 	r.headline("SEC sues exchange over Bitcoin ETF", r.now().Add(-time.Minute))
 	r.tick()
-	if r.api.Count() != 1 || !r.sent("News (") {
+	if r.api.Count() != 1 || !r.sent("Market news") {
 		t.Fatal("the headline is reported at once but waits for the cooldown")
 	}
 	r.advance(51 * time.Minute)
@@ -627,5 +638,153 @@ func TestPartialFillIsBooked(t *testing.T) {
 func TestModelTextCannotCarryTelegramCommands(t *testing.T) {
 	if got := untrusted("Rate it (/sellall) or /resume now; 1/2 is fine"); got != "Rate it (∕sellall) or ∕resume now; 1/2 is fine" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestDrawdownUnderAManualStopSellsNothingButSaysSo(t *testing.T) {
+	r := newRig(t, rate("strong_buy", "strong_buy"))
+	r.tick()
+	r.command("stop")
+	r.advance(10 * time.Minute)
+	for _, s := range []string{"BTCUSDT", "ETHUSDT"} {
+		r.ex.SetPrice(s, r.ex.Price(s, r.now())*0.3)
+	}
+	r.tick()
+	r.tick()
+	if len(r.ex.OrderList()) != 2 || r.eng.st.Liquidate || r.eng.st.HaltKind != haltManual || !r.sent("You stopped trading, so nothing is sold") {
+		t.Fatalf("a manual stop keeps holdings but reports the drawdown: orders %v, %q", r.ex.OrderList(), r.tg.Sent())
+	}
+}
+
+func TestResumeKeepsLossBaselinesUnlessALimitFired(t *testing.T) {
+	r := newRig(t, rate("strong_buy", "strong_buy"))
+	r.tick()
+	r.advance(10 * time.Minute)
+	for _, s := range []string{"BTCUSDT", "ETHUSDT"} {
+		r.ex.SetPrice(s, r.ex.Price(s, r.now())*0.95)
+	}
+	r.tick()
+	r.command("stop")
+	r.command("resume")
+	if r.eng.st.RiskBase.String() != "100" || r.eng.st.DayEquity.String() != "100" {
+		t.Fatalf("resuming a manual stop must not move the loss baselines: %s %s", r.eng.st.RiskBase, r.eng.st.DayEquity)
+	}
+	for _, s := range []string{"BTCUSDT", "ETHUSDT"} {
+		r.ex.SetPrice(s, r.ex.Price(s, r.now())*0.85)
+	}
+	r.tick()
+	if r.eng.st.HaltKind != haltDaily {
+		t.Fatalf("expected the daily limit: %q", r.eng.st.Halted)
+	}
+	r.command("resume")
+	if r.eng.st.RiskBase.String() != "100" || r.eng.st.DayEquity.Float() > 90 {
+		t.Fatalf("after a daily stop only the day counts from now: %s %s", r.eng.st.RiskBase, r.eng.st.DayEquity)
+	}
+}
+
+func TestSellOffGivesUpOnACoinBinanceKeepsRejecting(t *testing.T) {
+	r := newRig(t, rate("strong_buy", "strong_buy"))
+	r.tick()
+	r.ex.SetRejecting("BTCUSDT")
+	r.command("sellall")
+	for i := 0; i < 6; i++ {
+		r.advance(30 * time.Second)
+		r.tick()
+	}
+	if r.ex.RejectedCount() != sellTries || !r.sent("Could not sell BTC after 3 tries") || !r.sent("Sell-off finished, except BTC") || r.eng.st.Liquidate {
+		t.Fatalf("rejections %d, liquidate %v, %q", r.ex.RejectedCount(), r.eng.st.Liquidate, r.tg.Sent())
+	}
+	if orders := r.ex.OrderList(); len(orders) != 3 || orders[2].Symbol != "ETHUSDT" {
+		t.Fatalf("ETH must still be sold: %v", orders)
+	}
+}
+
+func TestOrderThatExpiresUnfilledIsReported(t *testing.T) {
+	r := newRig(t, rate("strong_buy", "hold"))
+	r.ex.SetFault(testkit.FaultExpireEmpty)
+	r.tick()
+	if len(r.eng.st.Pending) != 0 || len(r.eng.st.Trades) != 0 || r.eng.st.Ledger.Cash.String() != "100" || !r.sent("expired without filling") {
+		t.Fatalf("pending %v, %q", r.eng.st.Pending, r.tg.Sent())
+	}
+}
+
+func TestCommandsAreAnsweredWhileTheModelThinks(t *testing.T) {
+	r := newRig(t)
+	release := make(chan struct{})
+	r.api.Script = []func(string) (int, any){func(req string) (int, any) {
+		<-release
+		return rate("hold", "hold")(req)
+	}}
+	r.eng.Config.PollSeconds = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.eng.Run(ctx) }()
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s: %q", what, r.tg.Sent())
+			}
+		}
+	}
+	waitFor("the model call", func() bool { return r.api.Count() == 1 })
+	r.tg.Command("/status")
+	waitFor("the status reply", func() bool { return r.sent("📊 Status") })
+	if r.sent("🧠 Decision #1") {
+		t.Fatal("the decision cannot be done yet")
+	}
+	close(release)
+	waitFor("the decision", func() bool { return r.sent("🧠 Decision #1") })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPlanTrimsAboveTheExposureCapEvenInsideTheBand(t *testing.T) {
+	c := testkit.Config("unused")
+	rules := map[string]binance.Symbol{
+		"BTCUSDT": {StepSize: num.MustParse("0.00001"), MinNotional: num.Int(5), MinQty: num.MustParse("0.00001")},
+		"ETHUSDT": {StepSize: num.MustParse("0.0001"), MinNotional: num.Int(5), MinQty: num.MustParse("0.0001")},
+	}
+	prices := map[string]num.Dec{"BTCUSDT": num.Int(80000), "ETHUSDT": num.Int(2000)}
+	// 46% in each coin, 92% in all, against a 90% cap.
+	l := Ledger{Cash: num.Int(800), Holdings: map[string]num.Dec{"BTCUSDT": num.MustParse("0.0575"), "ETHUSDT": num.MustParse("2.3")}}
+	hold := map[string]analyst.Signal{"BTCUSDT": {Rating: analyst.RatingHold}, "ETHUSDT": {Rating: analyst.RatingHold}}
+	plans, _ := PlanOrders(c, rules, l, prices, hold)
+	if len(plans) != 2 || plans[0].Side != "SELL" || plans[1].Side != "SELL" {
+		t.Fatalf("both positions are trimmed back under the cap: %+v", plans)
+	}
+	rules["BTCUSDT"] = binance.Symbol{StepSize: num.MustParse("0.00001"), MinNotional: num.Int(5), MinQty: num.MustParse("0.01")}
+	if plans, _ := PlanOrders(c, rules, l, prices, hold); len(plans) != 1 || plans[0].Symbol != "ETHUSDT" {
+		t.Fatalf("a sell below the exchange's minimum quantity is skipped: %+v", plans)
+	}
+}
+
+func TestOldDecisionFoldersArePruned(t *testing.T) {
+	r := newRig(t)
+	root := filepath.Join(r.eng.Config.Dir(), "decisions")
+	for i := 1; i <= keepDecisions+5; i++ {
+		os.MkdirAll(filepath.Join(root, strconv.Itoa(i)), 0o755)
+	}
+	r.eng.prune()
+	entries, _ := os.ReadDir(root)
+	if len(entries) != keepDecisions {
+		t.Fatalf("kept %d folders", len(entries))
+	}
+	if _, err := os.Stat(filepath.Join(root, "1")); !os.IsNotExist(err) {
+		t.Fatal("the oldest folders go first")
+	}
+}
+
+func TestReportSurvivesZeroEquity(t *testing.T) {
+	c := testkit.Config("unused")
+	st := State{Name: "x", Mode: config.Testnet, Ledger: Ledger{Holdings: map[string]num.Dec{}}, Benchmark: Ledger{Holdings: map[string]num.Dec{}}}
+	r, err := BuildReport(c, st, map[string]num.Dec{"BTCUSDT": num.Int(1), "ETHUSDT": num.Int(1)}, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := json.Marshal(r); err != nil || strings.Contains(r.Text(), "NaN") {
+		t.Fatalf("zero equity must render: %v %q", err, r.Text())
 	}
 }

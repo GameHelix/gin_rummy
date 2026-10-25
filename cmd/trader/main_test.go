@@ -109,7 +109,7 @@ func TestInitDecideAndStatus(t *testing.T) {
 	if err := run(ctx, []string{"status", "--config", cfg}, &out, e); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"cli-test · testnet · trading", "BTC 0.0005", "#1 Oct 25 12:00 UTC requested from the command line: BTC strong_buy · ETH hold", "AI today $0.01"} {
+	for _, want := range []string{"📊 Status (testnet: test money, real prices)", "Trading: on", "BTC: 0.0005", "Last decision #1, 0m ago (requested from the command line)", "BTC: STRONG BUY · ETH: HOLD", "AI cost: $0.01 today"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("status lacks %q:\n%s", want, out.String())
 		}
