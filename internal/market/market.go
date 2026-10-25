@@ -58,6 +58,29 @@ func (s Series) BarsThrough(date string) []Bar {
 	return s.Bars[:i]
 }
 
+// NativeFactor converts this split-adjusted series back to the share units
+// in force on date: multiply its prices and dividends by the factor.
+func (s Series) NativeFactor(date string) float64 {
+	f := 1.0
+	for _, sp := range s.Splits {
+		if sp.Date > date {
+			f *= sp.Numerator / sp.Denominator
+		}
+	}
+	return f
+}
+
+// DividendsBetween sums per-share dividends with ex-dates in (after, through].
+func (s Series) DividendsBetween(after, through string) float64 {
+	var total float64
+	for _, d := range s.Dividends {
+		if d.Date > after && d.Date <= through {
+			total += d.Amount
+		}
+	}
+	return total
+}
+
 func (s Series) DividendOn(date string) float64 {
 	for _, d := range s.Dividends {
 		if d.Date == date {
@@ -83,12 +106,13 @@ type PriceSource struct {
 	BaseURL string
 }
 
-func (m PriceSource) Fetch(ctx context.Context, symbol string) ([]byte, error) {
+// Fetch downloads daily bars from `from` until now.
+func (m PriceSource) Fetch(ctx context.Context, symbol string, from time.Time) ([]byte, error) {
 	base := m.BaseURL
 	if base == "" {
 		base = "https://query1.finance.yahoo.com"
 	}
-	u := base + "/v8/finance/chart/" + url.PathEscape(symbol) + "?range=1y&interval=1d&events=div%2Csplits"
+	u := fmt.Sprintf("%s/v8/finance/chart/%s?period1=%d&period2=%d&interval=1d&events=div%%2Csplits", base, url.PathEscape(symbol), from.Unix(), time.Now().Add(48*time.Hour).Unix())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err

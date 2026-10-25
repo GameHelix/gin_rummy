@@ -47,7 +47,7 @@ type StatusReport struct {
 	Budget          *analyst.BudgetSummary `json:"llm_budget,omitempty"`
 }
 
-func BuildStatus(c config.Config, st State, budget *analyst.BudgetSummary, now time.Time) StatusReport {
+func BuildStatus(c config.Config, st State, budget *analyst.BudgetSummary, now time.Time) (StatusReport, error) {
 	r := StatusReport{Name: st.Name, LastSession: st.LastSession, Pending: st.Pending, LastDecision: st.LastDecision, Scorecard: Summarize(st.Scored), OpenSignals: len(st.OpenSignals), MissedDecisions: st.MissedDecisions, Budget: budget}
 	if next, err := market.NextCycleTime(now, c.CloseBuffer()); err == nil {
 		r.NextCycle = next.In(market.NewYork).Format("Mon Jan 2 15:04 MST")
@@ -55,11 +55,19 @@ func BuildStatus(c config.Config, st State, budget *analyst.BudgetSummary, now t
 	if len(st.History) > 0 {
 		r.Inception = st.History[0].Session
 	}
-	r.Agent = accountStatus(st.Agent, st.InitialCash, st.LastCloses, st.History, func(p EquityPoint) broker.Money { return p.AgentEquity })
-	r.Benchmark = accountStatus(st.Benchmark, st.InitialCash, st.LastCloses, st.History, func(p EquityPoint) broker.Money { return p.BenchmarkEquity })
+	var err error
+	if r.Agent, err = accountStatus(st.Agent, st.InitialCash, st.LastCloses, st.History, func(p EquityPoint) broker.Money { return p.AgentEquity }); err != nil {
+		return r, fmt.Errorf("agent account: %w", err)
+	}
+	if r.Benchmark, err = accountStatus(st.Benchmark, st.InitialCash, st.LastCloses, st.History, func(p EquityPoint) broker.Money { return p.BenchmarkEquity }); err != nil {
+		return r, fmt.Errorf("benchmark account: %w", err)
+	}
 	for symbol, shares := range st.Agent.Positions {
 		price := st.LastCloses[symbol]
-		value, _ := broker.ShareValue(shares, price)
+		value, err := broker.ShareValue(shares, price)
+		if err != nil {
+			return r, err
+		}
 		line := PositionLine{Symbol: symbol, Shares: shares, Price: price, Value: value}
 		if r.Agent.Equity > 0 {
 			line.Weight = float64(value) / float64(r.Agent.Equity)
@@ -70,13 +78,18 @@ func BuildStatus(c config.Config, st State, budget *analyst.BudgetSummary, now t
 		r.Positions = append(r.Positions, line)
 	}
 	sort.Slice(r.Positions, func(i, j int) bool { return r.Positions[i].Symbol < r.Positions[j].Symbol })
-	return r
+	return r, nil
 }
 
-func accountStatus(a broker.Account, initial broker.Money, closes map[string]broker.Money, history []EquityPoint, equityOf func(EquityPoint) broker.Money) AccountStatus {
+func accountStatus(a broker.Account, initial broker.Money, closes map[string]broker.Money, history []EquityPoint, equityOf func(EquityPoint) broker.Money) (AccountStatus, error) {
 	s := AccountStatus{Cash: a.Cash, Receivable: a.Receivable, Fees: a.FeesPaid}
-	invested, _ := a.Invested(closes)
-	s.Equity, _ = a.Equity(closes)
+	invested, err := a.Invested(closes)
+	if err != nil {
+		return s, err
+	}
+	if s.Equity, err = a.Equity(closes); err != nil {
+		return s, err
+	}
 	if initial > 0 {
 		s.Return = float64(s.Equity)/float64(initial) - 1
 	}
@@ -91,7 +104,7 @@ func accountStatus(a broker.Account, initial broker.Money, closes map[string]bro
 			s.MaxDrawdown = max(s.MaxDrawdown, 1-float64(e)/float64(peak))
 		}
 	}
-	return s
+	return s, nil
 }
 
 // Text is a one-screen summary; `status --json` has the details.

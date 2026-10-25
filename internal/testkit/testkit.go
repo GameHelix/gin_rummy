@@ -28,7 +28,7 @@ func Config(dir string) config.Config {
 		MaxPositionWeight: 0.4, MaxInvestedWeight: 0.8, RebalanceBand: 0.03, MinTradeUSD: 50,
 		HorizonSessions: 2, CloseBufferMinutes: 30,
 		Model: "test-model", Effort: "high", MaxOutputTokens: 4000, MaxTurns: 6, Samples: 1, NewsItems: 5,
-		RefusalFallback: true, InputUSDPerMillion: 4, OutputUSDPerMillion: 20,
+		RefusalFallback: true, InputUSDPerMillion: 4, OutputUSDPerMillion: 20, CacheWriteUSDPerMillion: 5, CacheReadUSDPerMillion: 0.2,
 		MaxDailyLLMUSD: 5, MaxMonthlyLLMUSD: 50, DataDir: dir,
 	}
 }

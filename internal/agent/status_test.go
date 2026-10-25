@@ -22,7 +22,10 @@ func TestStatusComparesAgainstBuyAndHold(t *testing.T) {
 		},
 		LastDecision: &Decision{Session: "2026-10-27", Signals: map[string]analyst.Signal{"AAA": {Rating: analyst.RatingStrongBuy}}},
 	}
-	r := BuildStatus(c, st, &analyst.BudgetSummary{TodayUSD: 0.4, DailyLimitUSD: 3, MonthUSD: 2, MonthlyLimitUSD: 40, MonthCalls: 9}, testkit.At(t, "2026-10-27 18:00"))
+	r, err := BuildStatus(c, st, &analyst.BudgetSummary{TodayUSD: 0.4, DailyLimitUSD: 3, MonthUSD: 2, MonthlyLimitUSD: 40, MonthCalls: 9}, testkit.At(t, "2026-10-27 18:00"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Agent: $6,000 + 40 × $105 = $10,200. Benchmark: $2,000 + $4,200 + $3,600 = $9,800.
 	if r.Agent.Equity != broker.Cents(10200) || r.Benchmark.Equity != broker.Cents(9800) {
 		t.Fatalf("equity: %+v %+v", r.Agent, r.Benchmark)
@@ -35,5 +38,15 @@ func TestStatusComparesAgainstBuyAndHold(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("status text lacks %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestStatusFailsInsteadOfValuingAHoldingAtZero(t *testing.T) {
+	st := State{Name: "t", InitialCash: broker.Cents(10000), Agent: broker.Account{Positions: map[string]int64{"AAA": 10}}, Benchmark: broker.NewAccount(0), LastCloses: map[string]broker.Money{}}
+	if _, err := BuildStatus(testkit.Config("unused"), st, nil, testkit.At(t, "2026-10-27 18:00")); err == nil {
+		t.Fatal("a holding without a price must not be reported as worth $0")
+	}
+	if err := st.validate(); err == nil {
+		t.Fatal("state with an unpriced holding must not load")
 	}
 }

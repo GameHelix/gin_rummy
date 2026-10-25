@@ -8,10 +8,18 @@ import (
 
 // Account is a cash-funded, long-only paper account in integer cents.
 type Account struct {
-	Cash       Money            `json:"cash_cents"`
-	Receivable Money            `json:"dividend_receivable_cents"`
-	Positions  map[string]int64 `json:"positions"`
-	FeesPaid   Money            `json:"fees_paid_cents"`
+	Cash        Money            `json:"cash_cents"`
+	Receivable  Money            `json:"dividend_receivable_cents"`
+	Receivables []Receivable     `json:"receivables,omitempty"`
+	Positions   map[string]int64 `json:"positions"`
+	FeesPaid    Money            `json:"fees_paid_cents"`
+}
+
+// Receivable is a declared dividend that becomes cash on PayOn.
+type Receivable struct {
+	Symbol string `json:"symbol"`
+	PayOn  string `json:"pay_on"`
+	Amount Money  `json:"amount_cents"`
 }
 
 func NewAccount(cash Money) Account { return Account{Cash: cash, Positions: map[string]int64{}} }
@@ -20,8 +28,7 @@ func (a Account) Invested(prices map[string]Money) (Money, error) {
 	return portfolioValue(a.Positions, prices)
 }
 
-// Equity includes dividend receivables. Yahoo supplies ex-dates but not
-// payment dates, so receivables count toward value but cannot fund purchases.
+// Equity includes dividends declared but not yet paid.
 func (a Account) Equity(prices map[string]Money) (Money, error) {
 	invested, err := a.Invested(prices)
 	if err != nil {
@@ -31,16 +38,59 @@ func (a Account) Equity(prices map[string]Money) (Money, error) {
 }
 
 // ApplyDividend books the ex-date entitlement of the shares held before the open.
-func (a *Account) ApplyDividend(symbol string, perShare float64) (Money, error) {
-	if a.Positions[symbol] == 0 || perShare == 0 {
+// The receivable is paid in cash on payOn.
+func (a *Account) ApplyDividend(symbol string, perShare float64, payOn string) (Money, error) {
+	held := a.Positions[symbol]
+	if held == 0 || perShare == 0 {
 		return 0, nil
 	}
-	credit, err := checkedCents(float64(a.Positions[symbol]) * perShare)
+	credit, err := dividendCents(held, perShare)
 	if err != nil {
 		return 0, err
 	}
-	a.Receivable, err = addMoney(a.Receivable, credit)
-	return credit, err
+	if a.Receivable, err = addMoney(a.Receivable, credit); err != nil {
+		return 0, err
+	}
+	a.Receivables = append(a.Receivables, Receivable{symbol, payOn, credit})
+	return credit, nil
+}
+
+// SettleDividends pays receivables due on or before date into cash.
+func (a *Account) SettleDividends(date string) (Money, error) {
+	var paid Money
+	keep := a.Receivables[:0]
+	for _, r := range a.Receivables {
+		if r.PayOn > date {
+			keep = append(keep, r)
+			continue
+		}
+		var err error
+		if a.Cash, err = addMoney(a.Cash, r.Amount); err != nil {
+			return 0, err
+		}
+		a.Receivable -= r.Amount
+		paid += r.Amount
+	}
+	a.Receivables = keep
+	return paid, nil
+}
+
+// dividendCents multiplies exactly in decimal and rounds half up to a cent.
+func dividendCents(shares int64, perShare float64) (Money, error) {
+	amount, ok := new(big.Rat).SetString(strconv.FormatFloat(perShare, 'f', -1, 64))
+	if !ok || amount.Sign() < 0 {
+		return 0, errors.New("invalid dividend amount")
+	}
+	cents := new(big.Rat).Mul(amount, new(big.Rat).SetInt64(shares))
+	cents.Mul(cents, big.NewRat(100, 1))
+	q, r := new(big.Int).QuoRem(cents.Num(), cents.Denom(), new(big.Int))
+	if new(big.Int).Mul(r, big.NewInt(2)).Cmp(cents.Denom()) >= 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	if !q.IsInt64() || q.Int64() > int64(maxAccountCents) {
+		return 0, errors.New("dividend exceeds the supported USD range")
+	}
+	return Money(q.Int64()), nil
 }
 
 // ApplySplit converts a holding into post-split shares at the open of the

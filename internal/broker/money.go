@@ -2,6 +2,7 @@ package broker
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"strconv"
@@ -44,14 +45,6 @@ func executionPrice(open, slippageBPS float64, buy bool) (Money, error) {
 	return Money(whole.Int64()), nil
 }
 
-func checkedCents(dollars float64) (Money, error) {
-	rounded := math.Round(dollars * 100)
-	if math.IsNaN(rounded) || math.IsInf(rounded, 0) || rounded < 0 || rounded > float64(maxAccountCents) {
-		return 0, errors.New("monetary value exceeds the supported USD range")
-	}
-	return Money(rounded), nil
-}
-
 func addMoney(values ...Money) (Money, error) {
 	var total Money
 	for _, value := range values {
@@ -79,7 +72,14 @@ func ShareValue(quantity int64, price Money) (Money, error) {
 func portfolioValue(positions map[string]int64, prices map[string]Money) (Money, error) {
 	var total Money
 	for symbol, quantity := range positions {
-		value, err := ShareValue(quantity, prices[symbol])
+		if quantity == 0 {
+			continue
+		}
+		price, ok := prices[symbol]
+		if !ok || price <= 0 {
+			return 0, fmt.Errorf("no price to value %s", symbol)
+		}
+		value, err := ShareValue(quantity, price)
 		if err != nil {
 			return 0, err
 		}

@@ -36,3 +36,25 @@ func TestSignalsAreScoredAgainstTheMarketAfterTheirHorizon(t *testing.T) {
 		t.Fatalf("summary: %+v", summary)
 	}
 }
+
+func TestScoresUseTotalReturnAndStrictHits(t *testing.T) {
+	c := testkit.Config("unused")
+	open := []OpenSignal{{"2026-10-23", "AAA", analyst.RatingBuy, "low", "2026-10-26", "2026-10-27"}, {"2026-10-23", "BBB", analyst.RatingSell, "low", "2026-10-26", "2026-10-27"}}
+	series := map[string]market.Series{
+		"AAA": {Bars: []market.Bar{{Date: "2026-10-26", Open: 100, Close: 100}, {Date: "2026-10-27", Open: 100, Close: 100}}, Dividends: []market.Dividend{{Date: "2026-10-27", Amount: 1}}},
+		"BBB": {Bars: []market.Bar{{Date: "2026-10-26", Open: 50, Close: 50}, {Date: "2026-10-27", Open: 50, Close: 50.25}}},
+		"MKT": {Bars: []market.Bar{{Date: "2026-10-26", Open: 400, Close: 400}, {Date: "2026-10-27", Open: 400, Close: 402}}},
+	}
+	_, scored, err := ScoreThrough(c, open, "2026-10-27", series)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// AAA: flat price plus a $1 dividend is +1% against the market's +0.5%.
+	if !*scored[0].Hit || scored[0].Excess < 0.0049 {
+		t.Fatalf("dividends must count: %+v", scored[0])
+	}
+	// BBB matched the market exactly: a tie is not a correct sell.
+	if *scored[1].Hit {
+		t.Fatalf("a tie must not count as a hit: %+v", scored[1])
+	}
+}

@@ -68,11 +68,14 @@ func PlanOrders(c config.Config, session string, signals map[string]analyst.Sign
 		target[s] = TargetWeight(c, rating[s], current[s])
 	}
 	// Keep total exposure within the limit, cutting new purchases first.
-	var total, increase float64
+	var total, increase, exposure float64
 	for _, s := range c.Symbols {
 		total += target[s]
 		increase += math.Max(0, target[s]-current[s])
+		exposure += current[s]
 	}
+	// Above the cap, reductions are mandatory and skip the band and minimum.
+	overCap := exposure > c.MaxInvestedWeight+1e-9
 	if excess := total - c.MaxInvestedWeight; excess > 1e-12 {
 		if increase > 0 {
 			cut := math.Min(excess, increase)
@@ -105,6 +108,8 @@ func PlanOrders(c config.Config, session string, signals map[string]analyst.Sign
 			delta = 0
 		case target[s] == 0:
 			line.Note = "no position"
+		case overCap && delta < 0:
+			line.Note = fmt.Sprintf("reduce exposure to the %.0f%% cap", c.MaxInvestedWeight*100)
 		case math.Abs(target[s]-current[s]) < c.RebalanceBand:
 			line.Note = fmt.Sprintf("change of %.1f%% is inside the %.1f%% no-trade band", math.Abs(target[s]-current[s])*100, c.RebalanceBand*100)
 			delta = 0

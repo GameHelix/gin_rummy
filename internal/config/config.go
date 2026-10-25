@@ -1,45 +1,49 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/ismatsamadov/trader/internal/store"
-	"slices"
 )
 
-// Config describes one paper-trading agent. Every field is required in the
-// JSON file so a missing setting never silently falls back to a default.
+// Config describes one paper-trading agent. Every field except model (set by
+// TRADER_MODEL) must be present in the JSON file.
 type Config struct {
-	Name                string   `json:"name"`
-	Symbols             []string `json:"symbols"`
-	MarketSymbol        string   `json:"market_symbol"`
-	InitialCash         float64  `json:"initial_cash"`
-	Commission          float64  `json:"commission"`
-	SlippageBPS         float64  `json:"slippage_bps"`
-	MaxPositionWeight   float64  `json:"max_position_weight"`
-	MaxInvestedWeight   float64  `json:"max_invested_weight"`
-	RebalanceBand       float64  `json:"rebalance_band"`
-	MinTradeUSD         float64  `json:"min_trade_usd"`
-	HorizonSessions     int      `json:"horizon_sessions"`
-	CloseBufferMinutes  int      `json:"close_buffer_minutes"`
-	Model               string   `json:"model"`
-	Effort              string   `json:"effort"`
-	MaxOutputTokens     int      `json:"max_output_tokens"`
-	MaxTurns            int      `json:"max_turns"`
-	Samples             int      `json:"samples"`
-	NewsItems           int      `json:"news_items"`
-	RefusalFallback     bool     `json:"refusal_fallback"`
-	InputUSDPerMillion  float64  `json:"input_usd_per_million"`
-	OutputUSDPerMillion float64  `json:"output_usd_per_million"`
-	MaxDailyLLMUSD      float64  `json:"max_daily_llm_usd"`
-	MaxMonthlyLLMUSD    float64  `json:"max_monthly_llm_usd"`
-	DataDir             string   `json:"data_dir"`
+	Name                    string   `json:"name"`
+	Symbols                 []string `json:"symbols"`
+	MarketSymbol            string   `json:"market_symbol"`
+	InitialCash             float64  `json:"initial_cash"`
+	Commission              float64  `json:"commission"`
+	SlippageBPS             float64  `json:"slippage_bps"`
+	MaxPositionWeight       float64  `json:"max_position_weight"`
+	MaxInvestedWeight       float64  `json:"max_invested_weight"`
+	RebalanceBand           float64  `json:"rebalance_band"`
+	MinTradeUSD             float64  `json:"min_trade_usd"`
+	HorizonSessions         int      `json:"horizon_sessions"`
+	CloseBufferMinutes      int      `json:"close_buffer_minutes"`
+	Model                   string   `json:"model"`
+	Effort                  string   `json:"effort"`
+	MaxOutputTokens         int      `json:"max_output_tokens"`
+	MaxTurns                int      `json:"max_turns"`
+	Samples                 int      `json:"samples"`
+	NewsItems               int      `json:"news_items"`
+	RefusalFallback         bool     `json:"refusal_fallback"`
+	InputUSDPerMillion      float64  `json:"input_usd_per_million"`
+	OutputUSDPerMillion     float64  `json:"output_usd_per_million"`
+	CacheWriteUSDPerMillion float64  `json:"cache_write_usd_per_million"`
+	CacheReadUSDPerMillion  float64  `json:"cache_read_usd_per_million"`
+	MaxDailyLLMUSD          float64  `json:"max_daily_llm_usd"`
+	MaxMonthlyLLMUSD        float64  `json:"max_monthly_llm_usd"`
+	DataDir                 string   `json:"data_dir"`
 }
 
 var symbolPattern = regexp.MustCompile(`^[A-Z][A-Z0-9.-]{0,14}$`)
@@ -50,6 +54,16 @@ func LoadConfig(path string) (Config, error) {
 	var c Config
 	if err := store.ReadJSON(path, &c); err != nil {
 		return c, fmt.Errorf("configuration: %w", err)
+	}
+	var present map[string]json.RawMessage
+	if err := store.ReadJSON(path, &present); err != nil {
+		return c, fmt.Errorf("configuration: %w", err)
+	}
+	t := reflect.TypeOf(c)
+	for i := 0; i < t.NumField(); i++ {
+		if key := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]; key != "model" && present[key] == nil {
+			return c, fmt.Errorf("configuration: missing %q", key)
+		}
 	}
 	// The model ID is a private setting kept in .env, not in the repository.
 	if m := strings.TrimSpace(os.Getenv("TRADER_MODEL")); m != "" {
@@ -75,7 +89,7 @@ func (c Config) Validate() error {
 	if c.MarketSymbol != "" && !symbolPattern.MatchString(c.MarketSymbol) {
 		return fmt.Errorf("invalid market_symbol %q", c.MarketSymbol)
 	}
-	for _, v := range []float64{c.InitialCash, c.Commission, c.SlippageBPS, c.MaxPositionWeight, c.MaxInvestedWeight, c.RebalanceBand, c.MinTradeUSD, c.InputUSDPerMillion, c.OutputUSDPerMillion, c.MaxDailyLLMUSD, c.MaxMonthlyLLMUSD} {
+	for _, v := range []float64{c.InitialCash, c.Commission, c.SlippageBPS, c.MaxPositionWeight, c.MaxInvestedWeight, c.RebalanceBand, c.MinTradeUSD, c.InputUSDPerMillion, c.OutputUSDPerMillion, c.CacheWriteUSDPerMillion, c.CacheReadUSDPerMillion, c.MaxDailyLLMUSD, c.MaxMonthlyLLMUSD} {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			return errors.New("configuration numbers must be finite")
 		}
@@ -123,7 +137,7 @@ func (c Config) Validate() error {
 	if c.NewsItems < 0 || c.NewsItems > 30 {
 		return errors.New("news_items must be 0–30")
 	}
-	if c.InputUSDPerMillion <= 0 || c.OutputUSDPerMillion <= 0 {
+	if c.InputUSDPerMillion <= 0 || c.OutputUSDPerMillion <= 0 || c.CacheWriteUSDPerMillion <= 0 || c.CacheReadUSDPerMillion <= 0 {
 		return errors.New("token prices must be positive")
 	}
 	if c.MaxDailyLLMUSD < 0 || c.MaxDailyLLMUSD > 1e4 || c.MaxMonthlyLLMUSD < 0 || c.MaxMonthlyLLMUSD > 1e5 {

@@ -1,7 +1,12 @@
 package market
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +113,29 @@ func TestIndicatorsUseOnlyTheSuppliedHistory(t *testing.T) {
 	}
 	if _, err := ComputeIndicators("AAA", "prices:AAA", bars[:60]); err == nil {
 		t.Fatal("too little history accepted")
+	}
+}
+
+func TestNativeFactorRestoresHistoricalShareUnits(t *testing.T) {
+	s := Series{Splits: []Split{{"2026-10-28", 2, 1}}, Dividends: []Dividend{{"2026-10-26", 0.5}, {"2026-10-29", 0.25}}}
+	if f := s.NativeFactor("2026-10-27"); f != 2 {
+		t.Fatalf("a bar before a 2-for-1 split is worth twice its adjusted price: %v", f)
+	}
+	if f := s.NativeFactor("2026-10-28"); f != 1 {
+		t.Fatalf("on the ex-date prices are already in new units: %v", f)
+	}
+	if got := s.DividendsBetween("2026-10-26", "2026-10-29"); got != 0.25 {
+		t.Fatalf("ex-date on the entry day is excluded: %v", got)
+	}
+}
+
+func TestFetchRequestsTheNeededRange(t *testing.T) {
+	var query url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { query = r.URL.Query() }))
+	defer srv.Close()
+	from := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	PriceSource{HTTP: srv.Client(), BaseURL: srv.URL}.Fetch(context.Background(), "AAA", from)
+	if query.Get("period1") != strconv.FormatInt(from.Unix(), 10) || query.Get("range") != "" {
+		t.Fatalf("expected an explicit start, got %v", query)
 	}
 }

@@ -29,7 +29,7 @@ func writeConfig(t *testing.T) string {
 		"max_position_weight": 0.4, "max_invested_weight": 0.8, "rebalance_band": 0.03, "min_trade_usd": 50,
 		"horizon_sessions": 3, "close_buffer_minutes": 30,
 		"model": "test-model", "effort": "high", "max_output_tokens": 4000, "max_turns": 4, "samples": 1, "news_items": 0,
-		"refusal_fallback": true, "input_usd_per_million": 4, "output_usd_per_million": 20,
+		"refusal_fallback": true, "input_usd_per_million": 4, "output_usd_per_million": 20, "cache_write_usd_per_million": 5, "cache_read_usd_per_million": 0.2,
 		"max_daily_llm_usd": 5, "max_monthly_llm_usd": 50, "data_dir": filepath.Join(dir, "data"),
 	}
 	raw, _ := json.Marshal(c)

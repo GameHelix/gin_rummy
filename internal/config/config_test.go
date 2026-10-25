@@ -19,7 +19,7 @@ func TestShippedConfigTakesTheModelFromTheEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Model != "test-model" || !c.RefusalFallback || c.MarketSymbol != "SPY" {
+	if c.Model != "test-model" || c.RefusalFallback || c.MarketSymbol != "SPY" {
 		t.Fatalf("shipped defaults changed: %+v", c)
 	}
 }
@@ -48,6 +48,22 @@ func TestConfigRejectsUnsafeOrUnknownSettings(t *testing.T) {
 	}
 }
 
+func TestEveryConfigKeyIsRequired(t *testing.T) {
+	t.Setenv("TRADER_MODEL", "test-model")
+	raw, _ := os.ReadFile(filepath.Join("..", "..", "config", "agent.json"))
+	for _, key := range []string{"commission", "slippage_bps", "rebalance_band", "refusal_fallback", "news_items"} {
+		var m map[string]any
+		json.Unmarshal(raw, &m)
+		delete(m, key)
+		edited, _ := json.Marshal(m)
+		path := filepath.Join(t.TempDir(), "c.json")
+		os.WriteFile(path, edited, 0o600)
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("missing %s accepted: %v", key, err)
+		}
+	}
+}
+
 func TestDotenvDoesNotEvaluateShellOrOverwriteEnvironment(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	os.WriteFile(path, []byte("# comment\nexport TRADER_TEST_A='$(touch /tmp/pwned)'\nTRADER_TEST_B=from-file\n"), 0o600)
@@ -73,7 +89,7 @@ func testConfig(dir string) Config {
 		MaxPositionWeight: 0.4, MaxInvestedWeight: 0.8, RebalanceBand: 0.03, MinTradeUSD: 50,
 		HorizonSessions: 2, CloseBufferMinutes: 30,
 		Model: "test-model", Effort: "high", MaxOutputTokens: 4000, MaxTurns: 6, Samples: 1, NewsItems: 5,
-		RefusalFallback: true, InputUSDPerMillion: 4, OutputUSDPerMillion: 20,
+		RefusalFallback: true, InputUSDPerMillion: 4, OutputUSDPerMillion: 20, CacheWriteUSDPerMillion: 5, CacheReadUSDPerMillion: 0.2,
 		MaxDailyLLMUSD: 5, MaxMonthlyLLMUSD: 50, DataDir: dir,
 	}
 }

@@ -32,23 +32,39 @@ type ScoredSignal struct {
 }
 
 func NewOpenSignals(c config.Config, decidedOn string, signals map[string]analyst.Signal) ([]OpenSignal, error) {
-	entry, err := market.NextSessionAfter(decidedOn)
+	win, err := signalWindow(c, decidedOn)
 	if err != nil {
 		return nil, err
+	}
+	return openSignals(c, win, decidedOn, signals), nil
+}
+
+type window struct{ entry, exit string }
+
+// signalWindow is checked before any paid analysis, so a calendar that cannot
+// schedule the exit never fails a decision after the money is spent.
+func signalWindow(c config.Config, decidedOn string) (window, error) {
+	entry, err := market.NextSessionAfter(decidedOn)
+	if err != nil {
+		return window{}, err
 	}
 	exit := entry
 	for i := 1; i < c.HorizonSessions; i++ {
 		if exit, err = market.NextSessionAfter(exit.Date); err != nil {
-			return nil, err
+			return window{}, err
 		}
 	}
+	return window{entry.Date, exit.Date}, nil
+}
+
+func openSignals(c config.Config, win window, decidedOn string, signals map[string]analyst.Signal) []OpenSignal {
 	var out []OpenSignal
 	for _, s := range c.Symbols {
 		if sig, ok := signals[s]; ok {
-			out = append(out, OpenSignal{decidedOn, s, sig.Rating, sig.Confidence, entry.Date, exit.Date})
+			out = append(out, OpenSignal{decidedOn, s, sig.Rating, sig.Confidence, win.entry, win.exit})
 		}
 	}
-	return out, nil
+	return out
 }
 
 // ScoreThrough grades signals whose exit session is on or before `through`,
@@ -62,7 +78,8 @@ func ScoreThrough(c config.Config, open []OpenSignal, through string, series map
 		if !ok1 || !ok2 {
 			return 0, fmt.Errorf("%s has no bars for %s–%s to score a signal", symbol, entry, exit)
 		}
-		return out.Close/in.Open - 1, nil
+		// Total return: dividends going ex after the entry open count too.
+		return (out.Close+series[symbol].DividendsBetween(entry, exit))/in.Open - 1, nil
 	}
 	for _, sig := range open {
 		if sig.ExitSession > through {
@@ -89,7 +106,7 @@ func ScoreThrough(c config.Config, open []OpenSignal, through string, series map
 		}
 		result := ScoredSignal{OpenSignal: sig, Return: round(ret, 6), Benchmark: round(bench, 6), Excess: round(ret-bench, 6)}
 		if score, _ := sig.Rating.Score(); score != 0 {
-			hit := (score > 0) == (ret-bench > 0)
+			hit := (score > 0 && ret-bench > 0) || (score < 0 && ret-bench < 0)
 			result.Hit = &hit
 		}
 		scored = append(scored, result)

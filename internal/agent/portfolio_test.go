@@ -124,3 +124,20 @@ func TestBenchmarkBuysEqualWeights(t *testing.T) {
 		t.Fatalf("benchmark quantities: %+v", orders)
 	}
 }
+
+func TestExposureAboveTheCapIsAlwaysReduced(t *testing.T) {
+	c := testkit.Config("unused")
+	c.Symbols = []string{"A", "B", "C", "D", "E"}
+	c.MaxPositionWeight, c.MaxInvestedWeight, c.RebalanceBand, c.MinTradeUSD = 0.2, 0.8, 0.03, 100
+	acct := broker.NewAccount(broker.Cents(1000))
+	closes := map[string]broker.Money{}
+	for _, s := range c.Symbols {
+		acct.Positions[s] = 18
+		closes[s] = broker.Cents(100)
+	}
+	// Five holdings at 18% each: 90% invested against an 80% cap, all rated hold.
+	orders, _, err := PlanOrders(c, "2026-10-23", map[string]analyst.Signal{}, acct, closes)
+	if err != nil || len(orders) != 5 || orders[0].Side != "sell" || orders[0].Quantity != 2 {
+		t.Fatalf("each position must be trimmed to 16%%: %+v %v", orders, err)
+	}
+}

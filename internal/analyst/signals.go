@@ -39,9 +39,9 @@ type Signal struct {
 	Agreement float64 `json:"agreement"`
 }
 
-// Aggregate combines independent analyst samples by taking the median rating
-// for each symbol. With an even split the median rounds toward hold, so
-// disagreement never causes a trade.
+// Aggregate combines independent analyst samples by median rating. With an
+// even count the milder of the two middle views wins and opposite views hold,
+// so the result is always a rating some sample chose, or hold.
 func Aggregate(symbols []string, samples []map[string]Signal) map[string]Signal {
 	out := map[string]Signal{}
 	for _, symbol := range symbols {
@@ -60,7 +60,15 @@ func Aggregate(symbols []string, samples []map[string]Signal) map[string]Signal 
 		sort.Ints(scores)
 		median := scores[len(scores)/2]
 		if len(scores)%2 == 0 {
-			median = (scores[len(scores)/2-1] + scores[len(scores)/2]) / 2 // truncates toward zero
+			lo, hi := scores[len(scores)/2-1], scores[len(scores)/2]
+			switch {
+			case lo < 0 && hi > 0:
+				median = 0
+			case hi <= 0:
+				median = hi
+			default:
+				median = lo
+			}
 		}
 		rating := ratingFromScore(median)
 		agree := 0

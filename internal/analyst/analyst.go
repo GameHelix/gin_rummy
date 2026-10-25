@@ -67,8 +67,10 @@ type SampleResult struct {
 	Turns     int               `json:"turns"`
 	ToolCalls []string          `json:"tool_calls"`
 	Fallback  bool              `json:"fallback_used"`
-	News      []market.NewsItem `json:"news,omitempty"`
-	CostUSD   float64           `json:"estimated_cost_usd"`
+	// Fingerprint ties a saved sample to the inputs that produced it.
+	Fingerprint string            `json:"fingerprint"`
+	News        []market.NewsItem `json:"news,omitempty"`
+	CostUSD     float64           `json:"estimated_cost_usd"`
 }
 
 type AnalystResult struct {
@@ -87,25 +89,28 @@ func (a *Analyst) Analyze(ctx context.Context, in AnalystInput) (AnalystResult, 
 	c := a.Config
 	var res AnalystResult
 	var valid []map[string]Signal
+	fingerprint := a.fingerprint(in)
 	for k := 1; k <= c.Samples; k++ {
 		path := filepath.Join(in.Dir, fmt.Sprintf("sample-%d.json", k))
 		var sample SampleResult
 		err := store.ReadJSON(path, &sample)
 		switch {
-		case err == nil:
+		case err == nil && sample.Fingerprint == fingerprint:
 			a.logf("analyst: reusing completed sample %d", k)
-		case errors.Is(err, os.ErrNotExist):
+		case err == nil || errors.Is(err, os.ErrNotExist):
 			sample, err = a.runSample(ctx, in, k)
-			res.CostUSD += sample.CostUSD
 			if err != nil {
+				res.CostUSD += sample.CostUSD
 				return res, err
 			}
+			sample.Fingerprint = fingerprint
 			if err := store.WriteJSON(path, sample); err != nil {
 				return res, err
 			}
 		default:
 			return res, err
 		}
+		res.CostUSD += sample.CostUSD
 		res.Samples = append(res.Samples, sample)
 		if sample.Signals != nil {
 			valid = append(valid, sample.Signals)
@@ -120,6 +125,26 @@ func (a *Analyst) Analyze(ctx context.Context, in AnalystInput) (AnalystResult, 
 		res.Reason = "no analyst sample produced valid ratings; every position is held"
 	}
 	return res, nil
+}
+
+// fingerprint covers everything that shapes a sample except the clock and live
+// news, so a retried cycle reuses only samples made for the same task.
+func (a *Analyst) fingerprint(in AnalystInput) string {
+	c := a.Config
+	b := in.Briefing
+	b.DecisionTime = ""
+	raw, _ := json.Marshal(struct {
+		Briefing  Briefing
+		System    string
+		Model     string
+		Effort    string
+		MaxTokens int
+		MaxTurns  int
+		News      int
+		Fallback  bool
+		Symbols   []string
+	}{b, systemPrompt(c), c.Model, c.Effort, c.MaxOutputTokens, c.MaxTurns, c.NewsItems, c.RefusalFallback, c.Symbols})
+	return store.Hash(raw)
 }
 
 func (a *Analyst) runSample(ctx context.Context, in AnalystInput, k int) (SampleResult, error) {
@@ -153,13 +178,15 @@ func (a *Analyst) runSample(ctx context.Context, in AnalystInput, k int) (Sample
 		params.Betas = []anthropic.AnthropicBeta{anthropic.AnthropicBetaServerSideFallback2026_07_01}
 		params.Fallbacks = anthropic.BetaFallbacksParamOfDefault()
 	}
+	var priorOutput int64
 	for turn := 1; turn <= c.MaxTurns; turn++ {
 		params.Messages = messages
-		resp, cost, err := a.call(ctx, in, params, fmt.Sprintf("sample-%d/turn-%d", k, turn))
+		resp, cost, err := a.call(ctx, in, params, fmt.Sprintf("sample-%d/turn-%d", k, turn), priorOutput)
 		res.CostUSD += cost
 		if err != nil {
 			return res, err
 		}
+		priorOutput += outputTokens(resp)
 		res.Turns = turn
 		if string(resp.Model) != c.Model {
 			res.Fallback = true // the server-side refusal fallback answered
@@ -467,14 +494,13 @@ func toolResult(id, out string, err error) anthropic.BetaContentBlockParamUnion 
 // even if the process dies mid-request. HTTP error responses release the
 // reservation (the request was not processed); 408/409/429/5xx are retried with
 // backoff; a network failure stays charged as uncertain and is retried.
-func (a *Analyst) call(ctx context.Context, in AnalystInput, params anthropic.BetaMessageNewParams, purpose string) (*anthropic.BetaMessage, float64, error) {
+func (a *Analyst) call(ctx context.Context, in AnalystInput, params anthropic.BetaMessageNewParams, purpose string, priorOutput int64) (*anthropic.BetaMessage, float64, error) {
 	c := a.Config
 	body, err := json.Marshal(params)
 	if err != nil {
 		return nil, 0, err
 	}
-	// Two bytes per input token over-estimates JSON-heavy prompts on purpose.
-	reserve := (float64(len(body))/2*c.InputUSDPerMillion + float64(c.MaxOutputTokens)*c.OutputUSDPerMillion) / 1e6
+	reserve := reservationUSD(c, len(body), priorOutput)
 	var lastErr error
 	for attempt := 1; attempt <= maxAPIAttempts; attempt++ {
 		att, err := a.Budget.Reserve(ctx, in.Briefing.Session, purpose, reserve)
@@ -543,24 +569,56 @@ func (a *Analyst) call(ctx context.Context, in AnalystInput, params anthropic.Be
 	return nil, 0, lastErr
 }
 
-// receiptJSON is the provider response kept for audit, minus its model
-// identifiers; the sample record notes whether a fallback model answered.
+// receiptJSON is the provider response kept for audit, minus every model
+// identifier; the sample record notes whether a fallback model answered.
 func receiptJSON(raw string) ([]byte, error) {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
 		return nil, err
 	}
-	delete(m, "model")
-	if usage, ok := m["usage"].(map[string]any); ok {
-		if iterations, ok := usage["iterations"].([]any); ok {
-			for _, it := range iterations {
-				if item, ok := it.(map[string]any); ok {
-					delete(item, "model")
-				}
-			}
+	return json.MarshalIndent(dropModels(v), "", "  ")
+}
+
+func dropModels(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		delete(t, "model")
+		for k, x := range t {
+			t[k] = dropModels(x)
+		}
+	case []any:
+		for i, x := range t {
+			t[i] = dropModels(x)
 		}
 	}
-	return json.MarshalIndent(m, "", "  ")
+	return v
+}
+
+// fallbackPriceCeiling prices attempts by an unknown fallback model.
+const fallbackPriceCeiling = 1.5
+
+// reservationUSD bounds one request's cost: every body byte as a token plus
+// earlier turns' output (which can return as input) and some framing, all at
+// the higher of the input and cache-write prices, plus the full output
+// allowance. With refusal fallback a second, possibly pricier attempt is added.
+func reservationUSD(c config.Config, bodyBytes int, priorOutput int64) float64 {
+	input := float64(bodyBytes) + float64(priorOutput) + 2000
+	one := (input*max(c.InputUSDPerMillion, c.CacheWriteUSDPerMillion) + float64(c.MaxOutputTokens)*c.OutputUSDPerMillion) / 1e6
+	if c.RefusalFallback {
+		return one * 2 * fallbackPriceCeiling
+	}
+	return one
+}
+
+func outputTokens(m *anthropic.BetaMessage) int64 {
+	if len(m.Usage.Iterations) == 0 {
+		return m.Usage.OutputTokens
+	}
+	var total int64
+	for _, it := range m.Usage.Iterations {
+		total += it.OutputTokens
+	}
+	return total
 }
 
 func retryableStatus(code int) bool {
@@ -576,23 +634,26 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 	return min(time.Duration(1<<attempt)*time.Second, 30*time.Second)
 }
 
-// usageCost estimates a response's cost at the configured token prices. With
-// server-side fallback the per-attempt iterations are the source of truth;
-// cache writes cost 1.25× and cache reads 0.1× the input rate.
+// usageCost estimates a response's cost at the configured prices. With
+// server-side fallback the per-attempt iterations are the source of truth, and
+// attempts by another model are priced at the fallback ceiling.
 func usageCost(c config.Config, m *anthropic.BetaMessage) float64 {
-	cost := func(input, write, read, output int64) float64 {
-		in, out := c.InputUSDPerMillion, c.OutputUSDPerMillion
-		return (float64(input)*in + float64(write)*in*1.25 + float64(read)*in*0.1 + float64(output)*out) / 1e6
+	cost := func(model string, input, write, read, output int64) float64 {
+		price := 1.0
+		if model != "" && model != c.Model {
+			price = fallbackPriceCeiling
+		}
+		return price * (float64(input)*c.InputUSDPerMillion + float64(write)*c.CacheWriteUSDPerMillion + float64(read)*c.CacheReadUSDPerMillion + float64(output)*c.OutputUSDPerMillion) / 1e6
 	}
 	if len(m.Usage.Iterations) > 0 {
 		var total float64
 		for _, it := range m.Usage.Iterations {
-			total += cost(it.InputTokens, it.CacheCreationInputTokens, it.CacheReadInputTokens, it.OutputTokens)
+			total += cost(string(it.Model), it.InputTokens, it.CacheCreationInputTokens, it.CacheReadInputTokens, it.OutputTokens)
 		}
 		return total
 	}
 	u := m.Usage
-	return cost(u.InputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens, u.OutputTokens)
+	return cost(string(m.Model), u.InputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens, u.OutputTokens)
 }
 
 func (a *Analyst) sleep(ctx context.Context, d time.Duration) error {

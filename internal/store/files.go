@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -57,7 +58,8 @@ func ReadJSON(path string, value any) error {
 	if err := d.Decode(value); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	if d.More() {
+	var extra json.RawMessage
+	if err := d.Decode(&extra); err != io.EOF {
 		return fmt.Errorf("%s: expected exactly one JSON value", path)
 	}
 	return nil

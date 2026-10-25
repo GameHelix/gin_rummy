@@ -10,9 +10,9 @@ import (
 // CalendarVersion identifies the reviewed schedule: the years a live agent can
 // trade in. Dates were checked against
 // https://www.nyse.com/markets/hours-calendars on 2026-10-25.
-const CalendarVersion = "xnys-2026-2027-v3"
+const CalendarVersion = "xnys-2026-2028-v4"
 
-const firstCalendarYear, lastCalendarYear = 2026, 2027
+const firstCalendarYear, lastCalendarYear = 2026, 2028
 
 var NewYork = func() *time.Location {
 	loc, err := time.LoadLocation("America/New_York")
@@ -194,7 +194,9 @@ func nyseEarlyClose(d time.Time) bool {
 	if d.Equal(nthWeekday(d.Year(), time.November, time.Thursday, 4).AddDate(0, 0, 1)) {
 		return true
 	}
-	// The published 2026–2027 schedule has one Christmas Eve early close and
-	// no July early close (July 4 falls on a weekend in both years).
-	return d.Format(time.DateOnly) == "2026-12-24"
+	switch d.Format(time.DateOnly) {
+	case "2026-12-24", "2028-07-03":
+		return true
+	}
+	return false
 }

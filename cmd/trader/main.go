@@ -156,7 +156,10 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		if err != nil {
 			return err
 		}
-		report := agent.BuildStatus(c, st, &summary, e.Now())
+		report, err := agent.BuildStatus(c, st, &summary, e.Now())
+		if err != nil {
+			return err
+		}
 		if *asJSON {
 			return writeJSON(out, report)
 		}

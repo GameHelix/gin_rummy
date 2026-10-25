@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,8 +105,15 @@ func TestLateCycleMissesTheDecisionButStillMarks(t *testing.T) {
 		t.Fatalf("orders can no longer reach the open: %+v %v", rep, err)
 	}
 	st, _ := LoadState(r.config)
-	if st.LastSession != "2026-10-23" || !st.BenchmarkStarted || len(st.BenchmarkPending) != 2 {
-		t.Fatalf("state after missed decision: %+v", st)
+	if st.LastSession != "2026-10-23" || st.BenchmarkStarted || len(st.BenchmarkPending) != 0 || st.DecisionPending != "" {
+		t.Fatalf("a late run must not give the benchmark Monday's open: %+v", st)
+	}
+	r.api.Script = []func(string) (int, any){testkit.SubmitStep(map[string]string{"AAA": "hold", "BBB": "hold"}, testkit.CitePrices)}
+	r.advance(t, "2026-10-26")
+	rep, err = r.agent.RunCycle(context.Background(), false)
+	st, _ = LoadState(r.config)
+	if err != nil || len(rep.BenchmarkFills) != 0 || !st.BenchmarkStarted || len(st.BenchmarkPending) != 2 {
+		t.Fatalf("the benchmark starts on the first on-time cycle, for the next open: %+v %v", rep, err)
 	}
 }
 
@@ -155,8 +163,8 @@ func TestPermanentAPIErrorLeavesStateForRetry(t *testing.T) {
 	if !errors.As(err, &perm) {
 		t.Fatalf("expected permanent error, got %v", err)
 	}
-	if st, _ := LoadState(r.config); st.LastSession != "" {
-		t.Fatal("failed cycle must not advance the account")
+	if st, _ := LoadState(r.config); st.LastSession != "2026-10-23" || st.DecisionPending != "2026-10-23" || st.LastDecision != nil {
+		t.Fatalf("accounting must be saved and the decision left pending: %+v", st)
 	}
 	r.api.Script = []func(string) (int, any){testkit.SubmitStep(map[string]string{"AAA": "buy", "BBB": "buy"}, testkit.CitePrices)}
 	if rep, err := r.agent.RunCycle(context.Background(), false); err != nil || rep.Status != StatusDecided {
@@ -225,8 +233,8 @@ func TestDaemonWaitsForTheNextCloseAfterPermanentErrors(t *testing.T) {
 	if r.api.Count() != 1 {
 		t.Fatalf("expected a single attempt before Monday's close, got %d", r.api.Count())
 	}
-	if st, _ := LoadState(r.config); st.LastSession != "" {
-		t.Fatal("a failed cycle must not advance the account")
+	if st, _ := LoadState(r.config); st.LastDecision != nil || st.DecisionPending != "2026-10-23" {
+		t.Fatal("a failed decision must stay pending")
 	}
 }
 
@@ -286,5 +294,110 @@ func newTestAnalyst(t *testing.T, c config.Config, apiURL, newsURL string) *anal
 		Config: c, Client: testkit.Client(apiURL), News: market.NewsSource{HTTP: http.DefaultClient, BaseURL: newsURL},
 		Budget: &analyst.Budget{Path: c.DataDir + "/budget.json", DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD},
 		Sleep:  func(context.Context, time.Duration) error { return nil },
+	}
+}
+
+func TestAnalystOutageStillSavesFills(t *testing.T) {
+	r := newAgentRig(t, testkit.SubmitStep(map[string]string{"AAA": "strong_buy", "BBB": "hold"}, testkit.CitePrices))
+	ctx := context.Background()
+	if _, err := r.agent.RunCycle(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	r.api.Script = []func(string) (int, any){func(string) (int, any) {
+		return 401, map[string]any{"type": "error", "error": map[string]any{"type": "authentication_error", "message": "x"}}
+	}}
+	r.advance(t, "2026-10-26")
+	if _, err := r.agent.RunCycle(ctx, false); err == nil {
+		t.Fatal("expected the analyst failure")
+	}
+	st, _ := LoadState(r.config)
+	if st.LastSession != "2026-10-26" || st.Agent.Positions["AAA"] == 0 || len(st.Pending) != 0 || st.DecisionPending != "2026-10-26" {
+		t.Fatalf("Monday's fill must be saved despite the outage: %+v", st)
+	}
+	r.api.Script = []func(string) (int, any){testkit.SubmitStep(map[string]string{"AAA": "strong_buy", "BBB": "hold"}, testkit.CitePrices)}
+	rep, err := r.agent.RunCycle(ctx, false)
+	after, _ := LoadState(r.config)
+	if err != nil || rep.Status != StatusDecided || len(rep.Fills) != 1 || after.Agent.Positions["AAA"] != st.Agent.Positions["AAA"] {
+		t.Fatalf("the retry decides without redoing the fill: %+v %v", rep, err)
+	}
+}
+
+func TestDecisionFinishingAfterTheDeadlineIsMissed(t *testing.T) {
+	r := newAgentRig(t)
+	r.clock = testkit.At(t, "2026-10-26 09:24") // one minute before Monday's order deadline
+	r.api.Script = []func(string) (int, any){func(req string) (int, any) {
+		r.clock = testkit.At(t, "2026-10-26 09:40") // the analysis runs past the open
+		return testkit.SubmitStep(map[string]string{"AAA": "strong_buy", "BBB": "hold"}, testkit.CitePrices)(req)
+	}}
+	rep, err := r.agent.RunCycle(context.Background(), false)
+	st, _ := LoadState(r.config)
+	if err != nil || rep.Status != StatusMissed || r.api.Count() != 1 || len(st.Pending) != 0 || st.LastDecision != nil {
+		t.Fatalf("a decision finished after the open must not place orders: %+v %v", rep, err)
+	}
+}
+
+func TestAnalysisCutOffAtTheDeadlineIsMissed(t *testing.T) {
+	r := newAgentRig(t)
+	r.clock = testkit.At(t, "2026-10-26 09:25").Add(-200 * time.Millisecond)
+	r.api.Script = []func(string) (int, any){func(req string) (int, any) {
+		time.Sleep(time.Second)
+		return testkit.SubmitStep(map[string]string{"AAA": "strong_buy", "BBB": "hold"}, testkit.CitePrices)(req)
+	}}
+	rep, err := r.agent.RunCycle(context.Background(), false)
+	st, _ := LoadState(r.config)
+	if err != nil || rep.Status != StatusMissed || len(st.Pending) != 0 || st.LastDecision != nil || st.DecisionPending != "" {
+		t.Fatalf("an analysis still running at the deadline must be abandoned: %+v %v", rep, err)
+	}
+}
+
+func TestSplitDuringDowntimeUsesHistoricalUnits(t *testing.T) {
+	r := newAgentRig(t, testkit.SubmitStep(map[string]string{"AAA": "strong_buy", "BBB": "hold"}, testkit.CitePrices), testkit.SubmitStep(map[string]string{"AAA": "sell", "BBB": "hold"}, testkit.CitePrices))
+	ctx := context.Background()
+	r.agent.RunCycle(ctx, false)
+	r.advance(t, "2026-10-26")
+	r.agent.RunCycle(ctx, false) // buys AAA, then decides to sell it at Tuesday's open
+	before, _ := LoadState(r.config)
+	// The agent is down on Tuesday; AAA splits 2-for-1 on Wednesday.
+	r.market.AddSplit("AAA", market.Split{Date: "2026-10-28", Numerator: 2, Denominator: 1})
+	r.advance(t, "2026-10-28")
+	rep, err := r.agent.RunCycle(ctx, false)
+	if err != nil || len(rep.Fills) != 1 {
+		t.Fatalf("catch-up: %+v %v", rep, err)
+	}
+	var native float64 // the generated bars are in pre-split units
+	for _, b := range r.market.Bars["AAA"] {
+		if b.Date == "2026-10-27" {
+			native = b.Open
+		}
+	}
+	if got := rep.Fills[0].Price.Dollars(); got < native*0.99 || got > native*1.01 {
+		t.Fatalf("Tuesday's sale must use Tuesday's price ($%.2f), got $%.2f", native, got)
+	}
+	after, _ := LoadState(r.config)
+	tue := after.History[len(after.History)-2]
+	if ratio := float64(tue.AgentEquity) / float64(before.History[len(before.History)-1].AgentEquity); ratio < 0.97 || ratio > 1.03 {
+		t.Fatalf("replayed Tuesday must not show a fictional drawdown: ratio %v", ratio)
+	}
+}
+
+func TestConcurrentInitCreatesOneAccount(t *testing.T) {
+	c := testkit.Config(t.TempDir())
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	created := 0
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := InitState(c, time.Now()); err == nil {
+				mu.Lock()
+				created++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if created != 1 {
+		t.Fatalf("exactly one initialisation may succeed, got %d", created)
 	}
 }

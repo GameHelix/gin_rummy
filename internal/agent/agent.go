@@ -59,14 +59,27 @@ type State struct {
 	Scored           []ScoredSignal          `json:"scored_signals"`
 	LastDecision     *Decision               `json:"last_decision,omitempty"`
 	MissedDecisions  []string                `json:"missed_decisions,omitempty"`
+	// DecisionPending is a session whose accounting is saved but whose
+	// decision is not yet made or marked missed.
+	DecisionPending string `json:"decision_pending,omitempty"`
 }
 
 func StatePath(c config.Config) string { return filepath.Join(c.DataDir, "state.json") }
 
 func InitState(c config.Config, now time.Time) (State, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	unlock, err := store.LockFile(ctx, filepath.Join(c.DataDir, "agent.lock"))
+	if err != nil {
+		return State{}, fmt.Errorf("another trader process is using %s: %w", c.DataDir, err)
+	}
+	defer unlock()
 	path := StatePath(c)
-	if _, err := os.Stat(path); err == nil {
+	switch _, err := os.Stat(path); {
+	case err == nil:
 		return State{}, fmt.Errorf("%s already exists; the paper account is already initialised", path)
+	case !errors.Is(err, os.ErrNotExist):
+		return State{}, err
 	}
 	cash := broker.Cents(c.InitialCash)
 	st := State{Version: stateVersion, Name: c.Name, Symbols: c.Symbols, CreatedAt: now.UTC().Format(time.RFC3339), InitialCash: cash, Agent: broker.NewAccount(cash), Benchmark: broker.NewAccount(cash), LastCloses: map[string]broker.Money{}}
@@ -95,7 +108,33 @@ func LoadState(c config.Config) (State, error) {
 	if st.LastCloses == nil {
 		st.LastCloses = map[string]broker.Money{}
 	}
+	if err := st.validate(); err != nil {
+		return st, fmt.Errorf("%s: %w", StatePath(c), err)
+	}
 	return st, nil
+}
+
+// validate rejects state that would value or trade incorrectly.
+func (st State) validate() error {
+	for name, acct := range map[string]broker.Account{"agent": st.Agent, "benchmark": st.Benchmark} {
+		if acct.Cash < 0 || acct.Receivable < 0 {
+			return fmt.Errorf("%s account has negative cash or receivables", name)
+		}
+		for sym, qty := range acct.Positions {
+			if qty < 0 {
+				return fmt.Errorf("%s account holds negative %s", name, sym)
+			}
+			if qty > 0 && st.LastCloses[sym] <= 0 {
+				return fmt.Errorf("%s account holds %s without a closing price", name, sym)
+			}
+		}
+	}
+	for _, o := range append(append([]broker.Order{}, st.Pending...), st.BenchmarkPending...) {
+		if o.Quantity <= 0 || (o.Side != "buy" && o.Side != "sell") {
+			return fmt.Errorf("invalid pending order %q", o.ID)
+		}
+	}
+	return nil
 }
 
 // Agent runs one decision cycle per exchange session against live data.
@@ -144,11 +183,11 @@ func (a *Agent) logf(format string, args ...any) {
 	}
 }
 
-// RunCycle brings the account up to the latest closed session: corporate
-// actions, fills at each missed open, marks at each close, then one new
-// decision if orders can still reach the next open. Running it again for the
-// same session is a no-op. A dry run fetches live data and builds the briefing
-// without calling the model or saving anything.
+// RunCycle brings the account up to the latest closed session, saves that
+// accounting, then makes one decision if orders can still reach the next open.
+// A failed decision is retried on the next run without redoing the accounting.
+// A dry run fetches live data and builds the briefing without calling the
+// model or saving anything.
 func (a *Agent) RunCycle(ctx context.Context, dryRun bool) (CycleReport, error) {
 	c := a.Config
 	lockCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
@@ -162,35 +201,60 @@ func (a *Agent) RunCycle(ctx context.Context, dryRun bool) (CycleReport, error) 
 	if err != nil {
 		return CycleReport{}, &analyst.PermanentError{Err: err}
 	}
-	now := a.now()
-	session, err := market.LatestClosedSession(now, c.CloseBuffer())
+	start := a.now()
+	session, err := market.LatestClosedSession(start, c.CloseBuffer())
 	if err != nil {
 		return CycleReport{}, &analyst.PermanentError{Err: err}
 	}
+	dir := filepath.Join(c.DataDir, "cycles", session.Date)
 	rep := CycleReport{Session: session.Date}
-	if st.LastSession != "" && session.Date <= st.LastSession {
-		rep.Status = StatusUpToDate
-		return rep, nil
+	accounting := st.LastSession == "" || session.Date > st.LastSession
+	if !accounting {
+		if st.DecisionPending != session.Date {
+			rep.Status = StatusUpToDate
+			return rep, nil
+		}
+		if err := store.ReadJSON(filepath.Join(dir, "cycle.json"), &rep); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return rep, err
+		}
 	}
 	sessions := []market.Session{session}
-	if st.LastSession != "" {
+	if accounting && st.LastSession != "" {
 		if sessions, err = market.SessionsAfter(st.LastSession, session.Date); err != nil {
 			return rep, err
 		}
 	}
-	dir := filepath.Join(c.DataDir, "cycles", session.Date)
-	series, err := a.loadMarket(ctx, dir, sessions, dryRun)
+	series, err := a.loadMarket(ctx, dir, sessions, fetchStart(start, st.LastSession), dryRun)
 	if err != nil {
 		return rep, err
 	}
-	for i, s := range sessions {
-		if err := a.processSession(&st, &rep, s, series); err != nil {
-			return rep, err
+	if accounting {
+		if st.DecisionPending != "" {
+			st.MissedDecisions = append(st.MissedDecisions, st.DecisionPending)
 		}
-		if i < len(sessions)-1 {
-			st.MissedDecisions = append(st.MissedDecisions, s.Date)
-			rep.Notes = append(rep.Notes, "no decision was made after "+s.Date+" (agent was not running)")
+		for i, s := range sessions {
+			if err := a.processSession(&st, &rep, s, series); err != nil {
+				return rep, err
+			}
+			if i < len(sessions)-1 {
+				st.MissedDecisions = append(st.MissedDecisions, s.Date)
+				rep.Notes = append(rep.Notes, "no decision was made after "+s.Date+" (agent was not running)")
+			}
 		}
+		st.DecisionPending = session.Date
+		if !dryRun {
+			if err := a.save(dir, rep, st); err != nil {
+				return rep, err
+			}
+		}
+	}
+	next, err := market.NextSessionAfter(session.Date)
+	if err != nil {
+		return rep, &analyst.PermanentError{Err: err}
+	}
+	deadline := next.OpenTime().Add(-5 * time.Minute)
+	if start.After(deadline) {
+		return a.missed(dir, rep, st, "too late to place orders for the "+next.Date+" open; holding positions", dryRun)
 	}
 	if !st.BenchmarkStarted && !dryRun {
 		if st.BenchmarkPending, err = BenchmarkOrders(c, session.Date, st.Benchmark, st.LastCloses); err != nil {
@@ -198,63 +262,99 @@ func (a *Agent) RunCycle(ctx context.Context, dryRun bool) (CycleReport, error) 
 		}
 		st.BenchmarkStarted = true
 	}
-	next, err := market.NextSessionAfter(session.Date)
+	briefing, bars, err := a.briefing(session, start, series)
 	if err != nil {
-		return rep, &analyst.PermanentError{Err: err}
-	}
-	if deadline := next.OpenTime().Add(-5 * time.Minute); now.After(deadline) {
-		rep.Status = StatusMissed
-		rep.Notes = append(rep.Notes, "too late to place orders for the "+next.Date+" open; holding positions")
-		st.MissedDecisions = append(st.MissedDecisions, session.Date)
-	} else {
-		briefing, bars, err := a.briefing(session, now, series)
-		if err != nil {
-			return rep, err
-		}
-		if dryRun {
-			rep.Status, rep.Briefing = StatusDryRun, &briefing
-			return rep, nil
-		}
-		if a.Analyst == nil {
-			return rep, &analyst.PermanentError{Err: errors.New("no analyst configured")}
-		}
-		result, err := a.Analyst.Analyze(ctx, analyst.AnalystInput{Briefing: briefing, Bars: bars, Cutoff: now, Dir: dir})
-		switch {
-		case errors.Is(err, analyst.ErrBudgetExceeded):
-			rep.Status = StatusMissed
-			rep.Notes = append(rep.Notes, err.Error()+"; holding positions")
-			st.MissedDecisions = append(st.MissedDecisions, session.Date)
-		case err != nil:
-			return rep, err
-		default:
-			orders, plan, err := PlanOrders(c, session.Date, result.Signals, st.Agent, st.LastCloses)
-			if err != nil {
-				return rep, err
-			}
-			st.Pending = orders
-			if !result.Abstained {
-				open, err := NewOpenSignals(c, session.Date, result.Signals)
-				if err != nil {
-					return rep, err
-				}
-				st.OpenSignals = append(st.OpenSignals, open...)
-			}
-			st.LastDecision = &Decision{Session: session.Date, DecidedAt: now.UTC().Format(time.RFC3339), Summary: result.Summary, Signals: result.Signals, Plan: plan, CostUSD: result.CostUSD, Abstained: result.Abstained, Note: result.Reason}
-			rep.Status, rep.Decision, rep.Orders = StatusDecided, st.LastDecision, orders
-		}
-	}
-	if err := store.WriteJSON(filepath.Join(dir, "cycle.json"), rep); err != nil {
 		return rep, err
 	}
-	return rep, store.WriteJSON(StatePath(c), st)
+	if dryRun {
+		rep.Status, rep.Briefing = StatusDryRun, &briefing
+		return rep, nil
+	}
+	if a.Analyst == nil {
+		return rep, &analyst.PermanentError{Err: errors.New("no analyst configured")}
+	}
+	win, winErr := signalWindow(c, session.Date)
+	// The timeout counts from the agent's clock, which tests replace.
+	actx, cancelAnalysis := context.WithTimeout(ctx, deadline.Sub(a.now()))
+	result, err := a.Analyst.Analyze(actx, analyst.AnalystInput{Briefing: briefing, Bars: bars, Cutoff: start, Dir: dir})
+	cancelAnalysis()
+	done := a.now()
+	switch {
+	case errors.Is(err, analyst.ErrBudgetExceeded):
+		return a.missed(dir, rep, st, err.Error()+"; holding positions", false)
+	case (err == nil && done.After(deadline)) || (errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil):
+		return a.missed(dir, rep, st, "analysis finished after the "+next.Date+" order deadline; holding positions", false)
+	case err != nil:
+		return rep, err
+	}
+	orders, plan, err := PlanOrders(c, session.Date, result.Signals, st.Agent, st.LastCloses)
+	if err != nil {
+		return rep, err
+	}
+	st.Pending = orders
+	if !result.Abstained {
+		if winErr != nil {
+			rep.Notes = append(rep.Notes, "ratings not scored: "+winErr.Error())
+		} else {
+			st.OpenSignals = append(st.OpenSignals, openSignals(c, win, session.Date, result.Signals)...)
+		}
+	}
+	st.LastDecision = &Decision{Session: session.Date, DecidedAt: done.UTC().Format(time.RFC3339), Summary: result.Summary, Signals: result.Signals, Plan: plan, CostUSD: result.CostUSD, Abstained: result.Abstained, Note: result.Reason}
+	st.DecisionPending = ""
+	rep.Status, rep.Decision, rep.Orders = StatusDecided, st.LastDecision, orders
+	return rep, a.save(dir, rep, st)
 }
+
+// missed records that no orders will reach the next open and holds positions.
+func (a *Agent) missed(dir string, rep CycleReport, st State, note string, dryRun bool) (CycleReport, error) {
+	rep.Status = StatusMissed
+	rep.Notes = append(rep.Notes, note)
+	if dryRun {
+		return rep, nil
+	}
+	st.MissedDecisions = append(st.MissedDecisions, rep.Session)
+	st.DecisionPending = ""
+	return rep, a.save(dir, rep, st)
+}
+
+func (a *Agent) save(dir string, rep CycleReport, st State) error {
+	if err := store.WriteJSON(filepath.Join(dir, "cycle.json"), rep); err != nil {
+		return err
+	}
+	return store.WriteJSON(StatePath(a.Config), st)
+}
+
+// fetchStart covers a year of history for indicators, reaching further back
+// when catching up after a long outage.
+func fetchStart(now time.Time, lastSession string) time.Time {
+	from := now.AddDate(-1, 0, -35)
+	if last, err := time.Parse(time.DateOnly, lastSession); err == nil && last.AddDate(0, 0, -150).Before(from) {
+		from = last.AddDate(0, 0, -150)
+	}
+	return from
+}
+
+// dividendPayDays approximates the gap from ex-date to payment; the price
+// source publishes ex-dates only.
+const dividendPayDays = 21
 
 func (a *Agent) processSession(st *State, rep *CycleReport, s market.Session, series map[string]market.Series) error {
 	c := a.Config
+	// The vendor restates history in today's share units. Convert each
+	// session back to the units in force then, matching the ledger's shares.
+	factor := map[string]float64{}
 	opens, closes := map[string]float64{}, map[string]broker.Money{}
+	for _, sym := range c.AllSymbols() {
+		factor[sym] = series[sym].NativeFactor(s.Date)
+	}
 	for _, sym := range c.Symbols {
 		bar, _ := series[sym].BarOn(s.Date)
-		opens[sym], closes[sym] = bar.Open, broker.Cents(bar.Close)
+		opens[sym], closes[sym] = bar.Open*factor[sym], broker.Cents(bar.Close*factor[sym])
+	}
+	for _, acct := range []*broker.Account{&st.Agent, &st.Benchmark} {
+		if _, err := acct.SettleDividends(s.Date); err != nil {
+			return err
+		}
 	}
 	// Corporate actions take effect at the open, before any order fills.
 	for _, sym := range c.Symbols {
@@ -273,13 +373,15 @@ func (a *Agent) processSession(st *State, rep *CycleReport, s market.Session, se
 			}
 			rep.CorporateEvents = append(rep.CorporateEvents, fmt.Sprintf("%s %s split %g-for-%g", s.Date, sym, sp.Numerator, sp.Denominator))
 		}
-		if amount := series[sym].DividendOn(s.Date); amount > 0 {
+		if amount := series[sym].DividendOn(s.Date) * factor[sym]; amount > 0 {
+			d, _ := time.Parse(time.DateOnly, s.Date)
+			payOn := d.AddDate(0, 0, dividendPayDays).Format(time.DateOnly)
 			for _, acct := range []*broker.Account{&st.Agent, &st.Benchmark} {
-				if _, err := acct.ApplyDividend(sym, amount); err != nil {
+				if _, err := acct.ApplyDividend(sym, amount, payOn); err != nil {
 					return err
 				}
 			}
-			rep.CorporateEvents = append(rep.CorporateEvents, fmt.Sprintf("%s %s dividend $%.4f per share", s.Date, sym, amount))
+			rep.CorporateEvents = append(rep.CorporateEvents, fmt.Sprintf("%s %s dividend $%.4f per share, paid %s", s.Date, sym, amount, payOn))
 		}
 	}
 	fills, rejections, err := broker.ExecuteAtOpen(c, s.Date, st.Pending, opens, &st.Agent)
@@ -310,7 +412,7 @@ func (a *Agent) processSession(st *State, rep *CycleReport, s market.Session, se
 	point := EquityPoint{Session: s.Date, AgentEquity: equity, AgentCash: st.Agent.Cash, AgentInvested: invested, BenchmarkEquity: bench}
 	if c.MarketSymbol != "" {
 		if bar, ok := series[c.MarketSymbol].BarOn(s.Date); ok {
-			point.MarketClose = bar.Close
+			point.MarketClose = round(bar.Close*factor[c.MarketSymbol], 4)
 		}
 	}
 	st.History = append(st.History, point)
@@ -331,7 +433,7 @@ func (a *Agent) processSession(st *State, rep *CycleReport, s market.Session, se
 // loadMarket reuses the cycle's archived payloads so a retried cycle sees the
 // same prices; otherwise it downloads fresh data and archives it once every
 // required bar is present.
-func (a *Agent) loadMarket(ctx context.Context, dir string, sessions []market.Session, dryRun bool) (map[string]market.Series, error) {
+func (a *Agent) loadMarket(ctx context.Context, dir string, sessions []market.Session, from time.Time, dryRun bool) (map[string]market.Series, error) {
 	symbols := a.Config.AllSymbols()
 	series := map[string]market.Series{}
 	archived := true
@@ -351,7 +453,7 @@ func (a *Agent) loadMarket(ctx context.Context, dir string, sessions []market.Se
 	if !archived {
 		raws := map[string][]byte{}
 		for _, sym := range symbols {
-			raw, err := a.Market.Fetch(ctx, sym)
+			raw, err := a.Market.Fetch(ctx, sym, from)
 			if err != nil {
 				return nil, err
 			}

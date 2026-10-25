@@ -1,6 +1,12 @@
 {
   "name": "us-large-caps",
-  "symbols": ["AAPL", "MSFT", "JPM", "XOM", "KO"],
+  "symbols": [
+    "AAPL",
+    "MSFT",
+    "JPM",
+    "XOM",
+    "KO"
+  ],
   "market_symbol": "SPY",
   "initial_cash": 10000,
   "commission": 1,
@@ -16,9 +22,11 @@
   "max_turns": 8,
   "samples": 1,
   "news_items": 8,
-  "refusal_fallback": true,
+  "refusal_fallback": false,
   "input_usd_per_million": 4.0,
   "output_usd_per_million": 20.0,
+  "cache_write_usd_per_million": 5.0,
+  "cache_read_usd_per_million": 0.2,
   "max_daily_llm_usd": 3.0,
   "max_monthly_llm_usd": 40.0,
   "data_dir": "data/agent"

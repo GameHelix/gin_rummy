@@ -240,9 +240,9 @@ func TestFallbackIterationsAreAllCharged(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatal(err)
 	}
-	// Both the declined attempt and the fallback are billed: $4/$20 per million,
-	// cache reads at 0.1x the input rate.
-	want := 1000*4.0/1e6 + (1000*4.0+2000*4*0.1+500*20.0)/1e6
+	// Both attempts are billed. The configured model costs $4 in / $20 out and
+	// $0.20 per cached read; the other model is priced at the 1.5x ceiling.
+	want := 1000*4.0/1e6 + 1.5*(1000*4.0+2000*0.2+500*20.0)/1e6
 	if got := usageCost(testkit.Config("x"), &m); math.Abs(got-want) > 1e-12 {
 		t.Fatalf("cost %v, want %v", got, want)
 	}
@@ -283,12 +283,59 @@ func TestSamplesAggregateByMedianAndCompletedSamplesAreReused(t *testing.T) {
 	if err != nil || api.Count() != 3 || again.Signals["AAA"].Rating != RatingBuy {
 		t.Fatalf("a retried cycle must reuse completed samples: %d calls, %v", api.Count(), err)
 	}
+	if again.CostUSD != res.CostUSD || res.CostUSD == 0 {
+		t.Fatalf("reused samples must keep their cost: %v vs %v", again.CostUSD, res.CostUSD)
+	}
+	a.Config.HorizonSessions = 60
+	if _, err := a.Analyze(context.Background(), in); err != nil || api.Count() != 6 {
+		t.Fatalf("samples made for a different task must not be reused: %d calls, %v", api.Count(), err)
+	}
 }
 
-func TestAggregateRoundsDisagreementTowardHold(t *testing.T) {
-	samples := []map[string]Signal{{"AAA": {Rating: RatingBuy}}, {"AAA": {Rating: RatingSell}}}
-	if got := Aggregate([]string{"AAA", "BBB"}, samples); got["AAA"].Rating != RatingHold || got["BBB"].Rating != RatingHold {
-		t.Fatalf("split vote must hold: %+v", got)
+func TestEvenVotesNeverInventARating(t *testing.T) {
+	for _, tc := range []struct{ a, b, want Rating }{
+		{RatingBuy, RatingSell, RatingHold}, {RatingHold, RatingStrongBuy, RatingHold}, {RatingBuy, RatingStrongBuy, RatingBuy},
+		{RatingStrongSell, RatingSell, RatingSell}, {RatingStrongSell, RatingHold, RatingHold}, {RatingStrongBuy, RatingStrongSell, RatingHold},
+	} {
+		samples := []map[string]Signal{{"AAA": {Rating: tc.a, Evidence: []string{"x"}}}, {"AAA": {Rating: tc.b, Evidence: []string{"y"}}}}
+		got := Aggregate([]string{"AAA", "BBB"}, samples)
+		if got["AAA"].Rating != tc.want || got["BBB"].Rating != RatingHold {
+			t.Fatalf("%s + %s: got %s", tc.a, tc.b, got["AAA"].Rating)
+		}
+		if got["AAA"].Rating != RatingHold && len(got["AAA"].Evidence) == 0 {
+			t.Fatalf("%s + %s: a trading rating must keep its evidence", tc.a, tc.b)
+		}
+	}
+}
+
+func TestReceiptsDropModelIDsEverywhere(t *testing.T) {
+	raw := `{"model":"m1","content":[{"type":"fallback","from":{"model":"m1"},"to":{"model":"m2"}}],"usage":{"iterations":[{"model":"m1"}]}}`
+	out, err := receiptJSON(raw)
+	if err != nil || strings.Contains(string(out), `"model"`) {
+		t.Fatalf("model IDs kept: %s %v", out, err)
+	}
+}
+
+func TestReservationCoversTheWorstCase(t *testing.T) {
+	c := testkit.Config("x")
+	worst := func(attempts int, model string) float64 {
+		var iters []map[string]any
+		for i := 0; i < attempts; i++ {
+			iters = append(iters, map[string]any{"type": "message", "model": model, "input_tokens": 0, "cache_creation_input_tokens": 10_000, "cache_read_input_tokens": 0, "output_tokens": c.MaxOutputTokens})
+		}
+		raw, _ := json.Marshal(map[string]any{"id": "m", "type": "message", "role": "assistant", "model": model, "content": []any{}, "stop_reason": "end_turn", "stop_sequence": nil,
+			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "iterations": iters}})
+		var m anthropic.BetaMessage
+		json.Unmarshal(raw, &m)
+		return usageCost(c, &m)
+	}
+	c.RefusalFallback = false
+	if r := reservationUSD(c, 10_000, 0); r < worst(1, c.Model) {
+		t.Fatalf("single attempt not covered: %v", r)
+	}
+	c.RefusalFallback = true
+	if r := reservationUSD(c, 10_000, 0); r < worst(2, "other-model") {
+		t.Fatalf("fallback attempts not covered: %v", r)
 	}
 }
 
