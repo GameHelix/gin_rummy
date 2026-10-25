@@ -30,7 +30,6 @@ type BudgetAttempt struct {
 	ID            string `json:"id"`
 	Session       string `json:"session"`
 	Purpose       string `json:"purpose"`
-	Model         string `json:"model"`
 	Status        string `json:"status"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
@@ -143,7 +142,7 @@ func (b *Budget) totals(j budgetJournal) (today, month int64, calls int) {
 }
 
 // Reserve records an upper-bound cost before a request is sent.
-func (b *Budget) Reserve(ctx context.Context, session, purpose, model string, usd float64) (BudgetAttempt, error) {
+func (b *Budget) Reserve(ctx context.Context, session, purpose string, usd float64) (BudgetAttempt, error) {
 	var attempt BudgetAttempt
 	reserve, err := usdNanos(usd)
 	if err != nil {
@@ -166,7 +165,7 @@ func (b *Budget) Reserve(ctx context.Context, session, purpose, model string, us
 		// The journal position makes IDs unique even for identical retries
 		// within one clock tick.
 		id := Hash([]byte(fmt.Sprintf("%s/%s/%s/%d", session, purpose, now, len(j.Attempts))))[:20]
-		attempt = BudgetAttempt{ID: id, Session: session, Purpose: purpose, Model: model, Status: attemptReserved, CreatedAt: now, UpdatedAt: now, ReservedNanos: reserve}
+		attempt = BudgetAttempt{ID: id, Session: session, Purpose: purpose, Status: attemptReserved, CreatedAt: now, UpdatedAt: now, ReservedNanos: reserve}
 		j.Attempts = append(j.Attempts, attempt)
 		return nil
 	})

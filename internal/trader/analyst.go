@@ -61,7 +61,7 @@ type SampleResult struct {
 	Error     string            `json:"error,omitempty"`
 	Turns     int               `json:"turns"`
 	ToolCalls []string          `json:"tool_calls"`
-	Models    []string          `json:"models"`
+	Fallback  bool              `json:"fallback_used"`
 	News      []NewsItem        `json:"news,omitempty"`
 	CostUSD   float64           `json:"estimated_cost_usd"`
 }
@@ -156,8 +156,8 @@ func (a *Analyst) runSample(ctx context.Context, in AnalystInput, k int) (Sample
 			return res, err
 		}
 		res.Turns = turn
-		if !contains(res.Models, string(resp.Model)) {
-			res.Models = append(res.Models, string(resp.Model))
+		if string(resp.Model) != c.Model {
+			res.Fallback = true // the server-side refusal fallback answered
 		}
 		switch resp.StopReason {
 		case anthropic.BetaStopReasonRefusal:
@@ -463,7 +463,7 @@ func (a *Analyst) call(ctx context.Context, in AnalystInput, params anthropic.Be
 	reserve := (float64(len(body))/2*c.InputUSDPerMillion + float64(c.MaxOutputTokens)*c.OutputUSDPerMillion) / 1e6
 	var lastErr error
 	for attempt := 1; attempt <= maxAPIAttempts; attempt++ {
-		att, err := a.Budget.Reserve(ctx, in.Briefing.Session, purpose, c.Model, reserve)
+		att, err := a.Budget.Reserve(ctx, in.Briefing.Session, purpose, reserve)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -482,7 +482,11 @@ func (a *Analyst) call(ctx context.Context, in AnalystInput, params anthropic.Be
 				return nil, cost, settleErr
 			}
 			if in.Dir != "" {
-				if err := AtomicWrite(filepath.Join(in.Dir, "calls", strings.ReplaceAll(purpose, "/", "-")+".json"), []byte(resp.RawJSON())); err != nil {
+				receipt, err := receiptJSON(resp.RawJSON())
+				if err != nil {
+					return nil, cost, err
+				}
+				if err := AtomicWrite(filepath.Join(in.Dir, "calls", strings.ReplaceAll(purpose, "/", "-")+".json"), receipt); err != nil {
 					return nil, cost, err
 				}
 			}
@@ -524,6 +528,26 @@ func (a *Analyst) call(ctx context.Context, in AnalystInput, params anthropic.Be
 		}
 	}
 	return nil, 0, lastErr
+}
+
+// receiptJSON is the provider response kept for audit, minus its model
+// identifiers; the sample record notes whether a fallback model answered.
+func receiptJSON(raw string) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, err
+	}
+	delete(m, "model")
+	if usage, ok := m["usage"].(map[string]any); ok {
+		if iterations, ok := usage["iterations"].([]any); ok {
+			for _, it := range iterations {
+				if item, ok := it.(map[string]any); ok {
+					delete(item, "model")
+				}
+			}
+		}
+	}
+	return json.MarshalIndent(m, "", "  ")
 }
 
 func retryableStatus(code int) bool {

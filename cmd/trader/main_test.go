@@ -149,7 +149,7 @@ func TestInitDryRunRunAndStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	var report trader.StatusReport
-	if err := json.Unmarshal(out.Bytes(), &report); err != nil || len(report.Pending) != 1 || report.Model != "test-model" {
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil || len(report.Pending) != 1 || report.LastSession != "2026-10-23" {
 		t.Fatalf("status json: %v %+v", err, report)
 	}
 	out.Reset()

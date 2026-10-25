@@ -29,7 +29,6 @@ type PositionLine struct {
 
 type StatusReport struct {
 	Name            string         `json:"name"`
-	Model           string         `json:"model"`
 	Inception       string         `json:"inception,omitempty"`
 	LastSession     string         `json:"last_session,omitempty"`
 	NextCycle       string         `json:"next_cycle,omitempty"`
@@ -45,7 +44,7 @@ type StatusReport struct {
 }
 
 func BuildStatus(c Config, st State, budget *BudgetSummary, now time.Time) StatusReport {
-	r := StatusReport{Name: st.Name, Model: c.Model, LastSession: st.LastSession, Pending: st.Pending, LastDecision: st.LastDecision, Scorecard: Summarize(st.Scored), OpenSignals: len(st.OpenSignals), MissedDecisions: st.MissedDecisions, Budget: budget}
+	r := StatusReport{Name: st.Name, LastSession: st.LastSession, Pending: st.Pending, LastDecision: st.LastDecision, Scorecard: Summarize(st.Scored), OpenSignals: len(st.OpenSignals), MissedDecisions: st.MissedDecisions, Budget: budget}
 	if next, err := NextCycleTime(now, c.CloseBuffer()); err == nil {
 		r.NextCycle = next.In(newYork).Format("Mon Jan 2 15:04 MST")
 	}

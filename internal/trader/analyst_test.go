@@ -100,8 +100,13 @@ func TestAnalystUsesToolsStrictSchemaAndCitedNews(t *testing.T) {
 	if sum.MonthCalls != 2 || sum.UnresolvedUSD != 0 || sum.TodayUSD <= 0 {
 		t.Fatalf("budget not settled per call: %+v", sum)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "calls", "sample-1-turn-2.json")); err != nil {
+	receipt, err := os.ReadFile(filepath.Join(dir, "calls", "sample-1-turn-2.json"))
+	if err != nil || !strings.Contains(string(receipt), `"stop_reason"`) {
 		t.Fatal("provider response receipt not archived")
+	}
+	journal, _ := os.ReadFile(a.Budget.Path)
+	if strings.Contains(string(receipt), `"model"`) || strings.Contains(string(journal), `"model"`) || res.Samples[0].Fallback {
+		t.Fatal("run records must not store model identifiers")
 	}
 }
 
