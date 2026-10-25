@@ -1,0 +1,16 @@
+# Runs the agent as a long-lived service: one cycle after every NYSE close.
+#   docker compose up -d --build        start (or rebuild and restart)
+#   docker compose logs -f              follow what it is doing
+#   docker compose run --rm trader status
+services:
+  trader:
+    build: .
+    image: trader:local
+    command: ["daemon"]
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    stop_grace_period: 30s
