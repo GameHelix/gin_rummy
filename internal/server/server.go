@@ -520,7 +520,7 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) (int, any, error) 
 func statusOut(row pg.AgentRow, running bool, r agent.Report) api.Status {
 	out := api.Status{AgentID: row.ID.String(), Name: row.Name, Mode: row.Mode, Running: running, Trading: api.TradingOn, StopReason: r.Halted,
 		Capital: r.Capital.String(), Equity: r.Equity.String(), BuyAndHold: r.BuyAndHold.String(), Cash: r.Cash.String(), Fees: r.FeesUSD.String(),
-		Positions: []api.Position{}, Trades: r.Trades, PendingOrders: r.Pending, GradedCalls: r.Calls, RightCalls: r.Hits, At: r.Now}
+		Positions: []api.Position{}, Trades: r.Trades, PendingOrders: r.Pending, GradedCalls: r.Calls, RightCalls: r.Hits, At: r.Now, Message: r.Text()}
 	switch {
 	case r.Selling:
 		out.Trading = api.TradingSelling
@@ -598,12 +598,18 @@ func (s *Server) command(w http.ResponseWriter, r *http.Request) (int, any, erro
 	if !ok {
 		return 0, nil, badRequest("command must be decide, stop_trading, resume_trading or sell_all")
 	}
+	if in.Via == "" {
+		in.Via = "app"
+	}
+	if in.Via != "app" && in.Via != "telegram" {
+		return 0, nil, badRequest("via must be app or telegram")
+	}
 	if _, err := s.Fleet.Store.Agent(r.Context(), ids[0], ids[1]); err != nil {
 		return 0, nil, err
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	reply, err := s.Agents.Command(ctx, ids[0], ids[1], name)
+	reply, err := s.Agents.Command(ctx, ids[0], ids[1], name, in.Via)
 	if err != nil {
 		return 0, nil, err
 	}

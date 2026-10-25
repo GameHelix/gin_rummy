@@ -184,7 +184,7 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 	if _, err := c.Status(ctx, tid, aid); code(err) != "no_account" {
 		t.Fatalf("a new agent has no account yet: %v", err)
 	}
-	if _, err := c.Command(ctx, tid, aid, api.Decide); code(err) != "not_running" {
+	if _, err := c.Command(ctx, tid, aid, api.Command{Command: api.Decide}); code(err) != "not_running" {
 		t.Fatalf("a stopped agent takes no commands: %v", err)
 	}
 
@@ -220,7 +220,7 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 	r.waitFor("the first trade", func() bool { return len(r.ex.OrderList()) == 1 })
 	r.waitFor("the trade on the stream", func() bool { return slices.Contains(types(), "trade.booked") })
 	st, err := c.Status(ctx, tid, aid)
-	if err != nil || !st.Running || st.Trading != api.TradingOn || st.Trades != 1 || st.LastDecision == nil || st.LastDecision.Ratings["BTCUSDT"].Rating != "strong_buy" || st.NextDecision == nil {
+	if err != nil || !st.Running || st.Trading != api.TradingOn || st.Trades != 1 || st.LastDecision == nil || st.LastDecision.Ratings["BTCUSDT"].Rating != "strong_buy" || st.NextDecision == nil || !strings.Contains(st.Message, "📊 Status") {
 		t.Fatalf("status: %+v %v", st, err)
 	}
 
@@ -234,7 +234,7 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 		{api.ResumeTrading, true, "Trading resumed"},
 		{api.SellAll, true, "Selling everything"},
 	} {
-		got, err := c.Command(ctx, tid, aid, step.command)
+		got, err := c.Command(ctx, tid, aid, api.Command{Command: step.command, Via: "telegram"})
 		if err != nil || got.OK != step.ok || !strings.Contains(got.Message, step.said) {
 			t.Fatalf("%s: %+v %v", step.command, got, err)
 		}
@@ -244,7 +244,7 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 	if r.sent("Send /resume first") {
 		t.Fatal("a refused command from the app is not announced on Telegram")
 	}
-	if _, err := c.Command(ctx, tid, aid, "leverage_up"); code(err) != "bad_request" {
+	if _, err := c.Command(ctx, tid, aid, api.Command{Command: "leverage_up"}); code(err) != "bad_request" {
 		t.Fatalf("unknown commands are refused: %v", err)
 	}
 
@@ -275,8 +275,8 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 	}
 	var commands []string
 	for _, e := range events() {
-		var p struct{ Name, Source string }
-		if e.Type == "command.received" && json.Unmarshal(e.Payload, &p) == nil && p.Source == "api" {
+		var p struct{ Name, Source, Via string }
+		if e.Type == "command.received" && json.Unmarshal(e.Payload, &p) == nil && p.Source == "api" && p.Via == "telegram" {
 			commands = append(commands, p.Name)
 		}
 	}
@@ -288,7 +288,7 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 	if _, err := c.Agent(ctx, bob.ID, aid); code(err) != "not_found" {
 		t.Fatalf("another tenant cannot see the agent: %v", err)
 	}
-	if _, err := c.Command(ctx, bob.ID, aid, api.SellAll); code(err) != "not_found" {
+	if _, err := c.Command(ctx, bob.ID, aid, api.Command{Command: api.SellAll}); code(err) != "not_found" {
 		t.Fatalf("another tenant cannot command the agent: %v", err)
 	}
 	if _, err := c.Events(ctx, bob.ID, aid, 0, 10); code(err) != "not_found" {

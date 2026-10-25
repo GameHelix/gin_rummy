@@ -177,9 +177,9 @@ func (c *Client) Status(ctx context.Context, tenant, agent string) (Status, erro
 
 // Command sends a command to a running agent: Decide, StopTrading,
 // ResumeTrading or SellAll.
-func (c *Client) Command(ctx context.Context, tenant, agent, command string) (CommandResult, error) {
+func (c *Client) Command(ctx context.Context, tenant, agent string, cmd Command) (CommandResult, error) {
 	var out CommandResult
-	return out, c.do(ctx, http.MethodPost, tenantPath(tenant, "agents", agent, "commands"), Command{Command: command}, &out)
+	return out, c.do(ctx, http.MethodPost, tenantPath(tenant, "agents", agent, "commands"), cmd, &out)
 }
 
 // Events returns up to limit of the agent's events after seq.

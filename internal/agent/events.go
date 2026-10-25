@@ -30,7 +30,7 @@ const (
 	evEquity          = "equity.hourly"
 	evCallGraded      = "call.graded"
 	evNewsAlert       = "news.alert"
-	evAlert           = "alert.raised"
+	evNotice          = "notice"
 )
 
 type accountCreated struct {
@@ -56,10 +56,11 @@ type agentStopped struct {
 	Halted   string             `json:"halted,omitempty"`
 }
 
-// alertRaised is a problem reported to the user, such as missing prices.
-type alertRaised struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
+// notice is a message for the user, as the notifier delivers it. Alert
+// names the kind of problem when it is a warning.
+type notice struct {
+	Text  string `json:"text"`
+	Alert string `json:"alert,omitempty"`
 }
 
 type decisionStarted struct {
@@ -133,6 +134,7 @@ type resumed struct {
 type commandReceived struct {
 	Name     string    `json:"name"`
 	Source   string    `json:"source"`
+	Via      string    `json:"via,omitempty"`
 	Sent     time.Time `json:"sent_at"`
 	Received time.Time `json:"received_at"`
 	Ignored  bool      `json:"ignored_as_stale,omitempty"`

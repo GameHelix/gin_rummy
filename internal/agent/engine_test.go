@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -771,7 +772,7 @@ func TestEngineAPICommandsRunInTheLoopLikeTelegramOnes(t *testing.T) {
 		{"resume", true, "Trading resumed"},
 		{"sellall", true, "Selling everything"},
 	} {
-		got, err := r.eng.Command(ctx, step.name)
+		got, err := r.eng.Command(ctx, step.name, "telegram")
 		if err != nil || got.OK != step.ok || !strings.Contains(got.Text, step.want) {
 			t.Fatalf("%s: %+v %v", step.name, got, err)
 		}
@@ -791,7 +792,7 @@ func TestEngineAPICommandsRunInTheLoopLikeTelegramOnes(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.eng.Command(context.Background(), "stop"); !errors.Is(err, ErrNotRunning) {
+	if _, err := r.eng.Command(context.Background(), "stop", "app"); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("a stopped agent takes no commands: %v", err)
 	}
 	events, err := audit.ReadAfter(EventsDir(r.eng.Config), 0, 1000)
@@ -801,12 +802,23 @@ func TestEngineAPICommandsRunInTheLoopLikeTelegramOnes(t *testing.T) {
 	var fromAPI []string
 	for _, ev := range events {
 		var c commandReceived
-		if ev.Type == evCommand && json.Unmarshal(ev.Body, &c) == nil && c.Source == sourceAPI {
+		if ev.Type == evCommand && json.Unmarshal(ev.Body, &c) == nil && c.Source == sourceAPI && c.Via == "telegram" {
 			fromAPI = append(fromAPI, c.Name)
 		}
 	}
 	if strings.Join(fromAPI, " ") != "stop decide resume sellall" || events[len(events)-1].Type != evAgentStopped {
 		t.Fatalf("commands on record: %v, last event %s", fromAPI, events[len(events)-1].Type)
+	}
+	// Each message Telegram got is on record as a notice, in the same order.
+	var notices []string
+	for _, ev := range events {
+		var n notice
+		if ev.Type == evNotice && json.Unmarshal(ev.Body, &n) == nil {
+			notices = append(notices, n.Text)
+		}
+	}
+	if !slices.Equal(notices, r.tg.Sent()) {
+		t.Fatalf("notices %q\ndiffer from Telegram %q", notices, r.tg.Sent())
 	}
 }
 
@@ -907,12 +919,14 @@ func TestEveryStepIsOnRecordBeforeItHappens(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "hold"))
 	r.tick()
 	types, events := auditTypes(t, r.eng.Config)
-	want := []string{evAccountCreated, evAgentStarted, evEquity, evDecisionStarted, evModelCall, evDecisionDone, evOrderIntent, evOrderResult, evTradeBooked}
+	// Each message to the user is a notice, recorded after the step it tells
+	// of: the decision, then the trade.
+	want := []string{evAccountCreated, evAgentStarted, evEquity, evDecisionStarted, evModelCall, evDecisionDone, evNotice, evOrderIntent, evOrderResult, evTradeBooked, evNotice}
 	if strings.Join(types, " ") != strings.Join(want, " ") {
 		t.Fatalf("events:\n got %v\nwant %v", types, want)
 	}
 	var intent orderIntent
-	json.Unmarshal(events[6].Body, &intent)
+	json.Unmarshal(events[7].Body, &intent)
 	if o := r.ex.OrderList()[0]; intent.ClientID != o.ClientID || intent.Side != "BUY" {
 		t.Fatalf("the intent must name the order that was sent: %+v vs %+v", intent, o)
 	}
@@ -928,8 +942,8 @@ func TestEveryStepIsOnRecordBeforeItHappens(t *testing.T) {
 	r.eng = newEngine(t, r.eng.Config, r)
 	r.open()
 	r.command("status")
-	if last, err := audit.Verify(EventsDir(r.eng.Config)); err != nil || last.Type != evCommand {
-		t.Fatalf("chain after restart: %v %+v", err, last)
+	if last, err := audit.Verify(EventsDir(r.eng.Config)); err != nil || last.Type != evNotice {
+		t.Fatalf("chain after restart, ending with the reply: %v %+v", err, last)
 	}
 }
 

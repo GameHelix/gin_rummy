@@ -499,6 +499,11 @@ components:
           type: string
           enum: [decide, stop_trading, resume_trading, sell_all]
           description: decide makes a decision now; stop_trading keeps holdings and stops new trades; resume_trading trades again; sell_all sells everything and stops trading.
+        via:
+          type: string
+          enum: [app, telegram]
+          default: app
+          description: Where the user sent it, for the audit log.
     CommandResult:
       type: object
       required: [ok, message]
@@ -546,7 +551,7 @@ components:
     Status:
       type: object
       description: Amounts are decimal strings in the quote asset.
-      required: [agent_id, name, mode, running, trading, capital, equity, buy_and_hold, cash, fees, positions, trades, pending_orders, graded_calls, right_calls, at]
+      required: [agent_id, name, mode, running, trading, capital, equity, buy_and_hold, cash, fees, positions, trades, pending_orders, graded_calls, right_calls, at, message]
       properties:
         agent_id: {type: string, format: uuid}
         name: {type: string}
@@ -570,6 +575,7 @@ components:
         right_calls: {type: integer}
         ai_spend: {$ref: "#/components/schemas/AISpend"}
         at: {type: string, format: date-time}
+        message: {type: string, description: The same account as a short text, as a chat shows it.}
     Event:
       type: object
       required: [seq, id, type, at, payload, hash]
@@ -582,8 +588,10 @@ components:
             account.created, agent.started, agent.stopped, decision.started,
             model.call, decision.finished, decision.failed, order.intent,
             order.result, trade.booked, trading.stopped, trading.resumed,
-            command.received, equity.hourly, call.graded, news.alert,
-            alert.raised. New types may be added; ignore unknown ones.
+            command.received, equity.hourly, call.graded, news.alert and
+            notice. A notice is a message for the user, {"text", "alert"},
+            where alert names the kind of warning. New types may be added;
+            ignore unknown ones.
         at: {type: string, format: date-time}
         payload: {type: object, description: The event's details; fields are only ever added.}
         hash: {type: string, description: Hex SHA-256 over the event and prev_hash.}

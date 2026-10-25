@@ -393,7 +393,7 @@ func serve(ctx context.Context, svc *fleet.Service, e env, out io.Writer) error 
 		},
 		Ship: func(ctx context.Context, spec fleet.Spec) {
 			who := pg.Agent{Tenant: spec.Tenant, ID: spec.Agent, Name: spec.Name, Mode: spec.Config.Mode}
-			pg.Ship(ctx, svc.Store, agent.EventsDir(spec.Config), func() (pg.Agent, bool) { return who, true }, 5*time.Second, logf)
+			pg.Ship(ctx, svc.Store, agent.EventsDir(spec.Config), func() (pg.Agent, bool) { return who, true }, 2*time.Second, logf)
 		},
 	}
 	if err := startAPI(ctx, svc, sup, e, logf); err != nil {

@@ -320,7 +320,7 @@ func startShipper(ctx context.Context, url string, c config.Config, out io.Write
 	logf := func(format string, args ...any) { fmt.Fprintf(out, format+"\n", args...) }
 	go func() {
 		defer store.Close()
-		pg.Ship(ctx, store, dir, identify, 5*time.Second, logf)
+		pg.Ship(ctx, store, dir, identify, 2*time.Second, logf)
 	}()
 	return nil
 }

@@ -26,9 +26,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # The engine API, for the app on this machine only.
+    # The engine API: for the app on this machine, and for the other
+    # Wickwise services as trader:8080 on the shared network.
     ports:
       - "127.0.0.1:8080:8080"
+    networks: [default, wickwise]
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
@@ -37,6 +39,10 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     stop_grace_period: 30s
+
+networks:
+  wickwise:
+    external: true
 
 volumes:
   pgdata:

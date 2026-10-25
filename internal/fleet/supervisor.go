@@ -44,12 +44,12 @@ func (s *Supervisor) engine(tenant, id uuid.UUID) *agent.Engine {
 func (s *Supervisor) Running(tenant, id uuid.UUID) bool { return s.engine(tenant, id) != nil }
 
 // Command sends a user command to a running agent and returns its answer.
-func (s *Supervisor) Command(ctx context.Context, tenant, id uuid.UUID, name string) (agent.Reply, error) {
+func (s *Supervisor) Command(ctx context.Context, tenant, id uuid.UUID, name, via string) (agent.Reply, error) {
 	e := s.engine(tenant, id)
 	if e == nil {
 		return agent.Reply{}, agent.ErrNotRunning
 	}
-	return e.Command(ctx, name)
+	return e.Command(ctx, name, via)
 }
 
 // Status reports a running agent's account as its loop sees it.

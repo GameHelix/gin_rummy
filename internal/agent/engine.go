@@ -73,6 +73,7 @@ type inbound struct {
 	sent     time.Time
 	received time.Time
 	offset   int64      // Telegram's next update offset
+	via      string     // for engine API commands: the app or the notifier's chat
 	reply    chan Reply // where an engine API caller waits
 }
 
@@ -102,11 +103,12 @@ func (e *Engine) mailbox() chan inbound {
 }
 
 // Command runs a command from the engine API in the agent's loop, as a
-// Telegram command runs, and returns the answer. A command that changes
-// something is recorded and announced on Telegram too. Names are those of
-// the Telegram commands: decide, stop, resume and sellall.
-func (e *Engine) Command(ctx context.Context, name string) (Reply, error) {
-	return e.ask(ctx, inbound{name: name, source: sourceAPI, sent: e.now(), received: e.now()})
+// Telegram command runs, and returns the answer. A command that takes
+// effect is also announced as a notice. Names are those of the Telegram
+// commands: decide, stop, resume and sellall. Via says where the user sent
+// it: the app or telegram.
+func (e *Engine) Command(ctx context.Context, name, via string) (Reply, error) {
+	return e.ask(ctx, inbound{name: name, source: sourceAPI, via: via, sent: e.now(), received: e.now()})
 }
 
 // Status reports the account as the running loop sees it, without
@@ -164,13 +166,18 @@ func (e *Engine) logf(format string, args ...any) {
 	fmt.Fprintf(e.Log, "%s %s\n", time.Now().UTC().Format("2006-01-02 15:04:05Z"), fmt.Sprintf(format, args...))
 }
 
-// notify sends text to Telegram and the log. On testnet every message starts
-// with 🧪 so it is never mistaken for a real trade.
-func (e *Engine) notify(ctx context.Context, text string) {
+// notify tells the user something. It is recorded as a notice, which the
+// notifier delivers, and sent to the agent's own Telegram bot if it has
+// one. On testnet every message starts with 🧪 so it is never mistaken for
+// a real trade.
+func (e *Engine) notify(ctx context.Context, text string) { e.say(ctx, text, "") }
+
+func (e *Engine) say(ctx context.Context, text, alert string) {
 	if e.Config.Mode != config.Live {
 		text = "🧪 " + text
 	}
 	e.logf("%s", strings.ReplaceAll(text, "\n", " | "))
+	e.emit(evNotice, notice{Text: text, Alert: alert})
 	if e.Bot == nil {
 		return
 	}
@@ -191,8 +198,7 @@ func (e *Engine) alert(ctx context.Context, kind, text string) {
 		return
 	}
 	e.alerted[kind] = e.now()
-	e.emit(evAlert, alertRaised{Kind: kind, Message: text})
-	e.notify(ctx, text)
+	e.say(ctx, text, kind)
 }
 
 // save writes the state when it has changed since the last write.
@@ -470,8 +476,8 @@ func (e *Engine) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			e.emit(evAgentStopped, agentStopped{Cash: e.st.Ledger.Cash, Holdings: e.st.Ledger.Holdings, Halted: e.st.Halted})
 			e.notify(ctx, "⏹ Stopped.")
+			e.emit(evAgentStopped, agentStopped{Cash: e.st.Ledger.Cash, Holdings: e.st.Ledger.Holdings, Halted: e.st.Halted})
 			return e.save()
 		case in := <-e.inbox:
 			e.handle(ctx, in)
@@ -635,7 +641,7 @@ func (e *Engine) handle(ctx context.Context, in inbound) {
 	if in.source == sourceTelegram {
 		e.st.TelegramOffset = max(e.st.TelegramOffset, in.offset)
 	}
-	e.emit(evCommand, commandReceived{Name: in.name, Source: in.source, Sent: in.sent, Received: in.received, Ignored: stale(in)})
+	e.emit(evCommand, commandReceived{Name: in.name, Source: in.source, Via: in.via, Sent: in.sent, Received: in.received, Ignored: stale(in)})
 	// answer replies in the chat a Telegram command came from. An engine API
 	// command is answered to its caller, and on Telegram too when it took
 	// effect, so the chat hears of every stop and resume.

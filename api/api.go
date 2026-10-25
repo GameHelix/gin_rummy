@@ -133,8 +133,11 @@ const (
 	SellAll       = "sell_all"
 )
 
+// Command is a command for a running agent. Via says where the user sent
+// it, for the audit log: "app" (the default) or "telegram".
 type Command struct {
 	Command string `json:"command"`
+	Via     string `json:"via,omitempty"`
 }
 
 // CommandResult is the agent's answer. OK is false when the agent did not
@@ -146,6 +149,7 @@ type CommandResult struct {
 
 // Status is an agent's account. Amounts are decimal strings in the quote
 // asset. Text written by the model is untrusted: show it as plain text.
+// Message is the same account as a short text, as a chat shows it.
 type Status struct {
 	AgentID       string     `json:"agent_id"`
 	Name          string     `json:"name"`
@@ -167,6 +171,7 @@ type Status struct {
 	RightCalls    int        `json:"right_calls"`
 	AISpend       *AISpend   `json:"ai_spend,omitempty"`
 	At            time.Time  `json:"at"`
+	Message       string     `json:"message"`
 }
 
 // Trading states in Status.

@@ -10,6 +10,7 @@ An AI crypto trading agent for Binance spot. It watches BTC and ETH around the c
 
 ```sh
 mkdir -p data                           # on Linux: sudo chown 65532 data
+docker network create wickwise          # once per machine; Wickwise services meet on it
 docker compose run --rm trader check    # keys, permissions, balance, news, Telegram
 docker compose run --rm trader init     # start with capital_usd (100 USDT)
 docker compose run --rm trader import   # hand the agent and its keys to the engine
