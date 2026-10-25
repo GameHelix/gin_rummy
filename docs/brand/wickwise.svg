@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141B34"/>
+      <stop offset="1" stop-color="#0A0F1F"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3EE6B4"/>
+      <stop offset="1" stop-color="#14B88A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="256" cy="128" r="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFC24A" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#FFC24A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <circle cx="256" cy="128" r="150" fill="url(#glow)"/>
+  <!-- wicks -->
+  <line x1="256" y1="168" x2="256" y2="214" stroke="#3EE6B4" stroke-width="16" stroke-linecap="round"/>
+  <line x1="256" y1="380" x2="256" y2="436" stroke="#14B88A" stroke-width="16" stroke-linecap="round"/>
+  <!-- body -->
+  <rect x="196" y="206" width="120" height="182" rx="22" fill="url(#body)"/>
+  <!-- flame -->
+  <path d="M256 58 C 290 104, 300 132, 286 156 C 276 172, 236 172, 226 156 C 212 132, 222 104, 256 58 Z" fill="#FFB43A"/>
+  <path d="M256 104 C 271 126, 274 140, 267 152 C 262 160, 250 160, 245 152 C 238 140, 241 126, 256 104 Z" fill="#FFE7A3"/>
+</svg>
