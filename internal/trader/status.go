@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 )
 
@@ -90,77 +89,72 @@ func accountStatus(a Account, initial Money, closes map[string]Money, history []
 	return s
 }
 
+// Text is a one-screen summary; `status --json` has the details.
 func (r StatusReport) Text() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s · paper account\n", r.Name)
-	if r.LastSession == "" {
-		fmt.Fprintf(&b, "No session processed yet. Next cycle: %s.\n", r.NextCycle)
-	} else {
-		fmt.Fprintf(&b, "Through %s (since %s). Next cycle: %s.\n", r.LastSession, r.Inception, r.NextCycle)
+	line := func(label, value string) { fmt.Fprintf(&b, "%-10s %s\n", label, value) }
+	through := "no session yet"
+	if r.LastSession != "" {
+		through = "through " + r.LastSession
 	}
-	b.WriteString("\n")
-	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(w, "\tequity\treturn\tmax drawdown\texposure\tfees\t")
-	fmt.Fprintf(w, "agent\t$%.2f\t%+.2f%%\t%.2f%%\t%.0f%%\t$%.2f\t\n", r.Agent.Equity.Dollars(), r.Agent.Return*100, r.Agent.MaxDrawdown*100, r.Agent.Exposure*100, r.Agent.Fees.Dollars())
-	fmt.Fprintf(w, "buy & hold\t$%.2f\t%+.2f%%\t%.2f%%\t%.0f%%\t$%.2f\t\n", r.Benchmark.Equity.Dollars(), r.Benchmark.Return*100, r.Benchmark.MaxDrawdown*100, r.Benchmark.Exposure*100, r.Benchmark.Fees.Dollars())
-	w.Flush()
-	verdict := "ahead of"
-	if r.Agent.Return < r.Benchmark.Return {
-		verdict = "behind"
+	fmt.Fprintf(&b, "%s · %s · next %s\n", r.Name, through, r.NextCycle)
+	account := func(a AccountStatus) string {
+		return fmt.Sprintf("$%.2f  %+.2f%%  dd %.2f%%  exposure %.0f%%", a.Equity.Dollars(), a.Return*100, a.MaxDrawdown*100, a.Exposure*100)
 	}
-	fmt.Fprintf(&b, "\nAgent is %s buy-and-hold by %.2f percentage points (before LLM costs).\n", verdict, (r.Agent.Return-r.Benchmark.Return)*100)
-	if len(r.Positions) > 0 {
-		b.WriteString("\nPositions:\n")
-		w = tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-		for _, p := range r.Positions {
-			fmt.Fprintf(w, "  %s\t%d sh\t$%.2f\t%.1f%%\t%s\n", p.Symbol, p.Shares, p.Value.Dollars(), p.Weight*100, p.Rating)
-		}
-		w.Flush()
+	line("agent", account(r.Agent))
+	line("buy&hold", account(r.Benchmark))
+	positions := []string{}
+	for _, p := range r.Positions {
+		positions = append(positions, fmt.Sprintf("%s %d", p.Symbol, p.Shares))
 	}
-	fmt.Fprintf(&b, "Cash $%.2f", r.Agent.Cash.Dollars())
-	if r.Agent.Receivable > 0 {
-		fmt.Fprintf(&b, " · dividends receivable $%.2f", r.Agent.Receivable.Dollars())
-	}
-	b.WriteString("\n")
+	line("positions", joinOr(positions, ", ", "none"))
 	if len(r.Pending) > 0 {
-		b.WriteString("\nOrders for the next open:\n")
+		orders := []string{}
 		for _, o := range r.Pending {
-			fmt.Fprintf(&b, "  %s %d %s — %s\n", strings.ToUpper(o.Side), o.Quantity, o.Symbol, o.Reason)
+			orders = append(orders, fmt.Sprintf("%s %d %s", strings.ToUpper(o.Side), o.Quantity, o.Symbol))
 		}
+		line("orders", strings.Join(orders, ", "))
 	}
 	if d := r.LastDecision; d != nil {
-		fmt.Fprintf(&b, "\nLast decision (%s, est. $%.2f):", d.Session, d.CostUSD)
+		ratings := []string{}
+		for _, p := range d.Plan {
+			ratings = append(ratings, fmt.Sprintf("%s %s", p.Symbol, p.Rating))
+		}
+		if len(ratings) == 0 {
+			for symbol, sig := range d.Signals {
+				ratings = append(ratings, fmt.Sprintf("%s %s", symbol, sig.Rating))
+			}
+			sort.Strings(ratings)
+		}
+		value := strings.Join(ratings, " · ") + " (" + d.Session + ")"
 		if d.Abstained {
-			fmt.Fprintf(&b, " abstained — %s", d.Note)
+			value = "abstained (" + d.Session + ")"
 		}
-		if d.Summary != "" {
-			fmt.Fprintf(&b, "\n  %s", d.Summary)
-		}
-		b.WriteString("\n")
-		for _, line := range d.Plan {
-			fmt.Fprintf(&b, "  %-6s %-11s %s\n", line.Symbol, line.Rating, line.Note)
-		}
+		line("ratings", value)
 	}
-	b.WriteString("\nSignal scorecard (excess return vs benchmark over the horizon):\n")
-	if len(r.Scorecard) == 0 {
-		fmt.Fprintf(&b, "  no signals have matured yet (%d open)\n", r.OpenSignals)
-	}
+	scores := []string{}
 	for _, s := range r.Scorecard {
-		if score, _ := s.Rating.Score(); score == 0 {
-			fmt.Fprintf(&b, "  %-11s n=%-4d mean excess %+.2f%%\n", s.Rating, s.Count, s.MeanExcess*100)
-		} else {
-			fmt.Fprintf(&b, "  %-11s n=%-4d hit rate %3.0f%%  mean excess %+.2f%%\n", s.Rating, s.Count, float64(s.Hits)/float64(s.Count)*100, s.MeanExcess*100)
+		if score, _ := s.Rating.Score(); score != 0 {
+			scores = append(scores, fmt.Sprintf("%s %.0f%% hit n=%d", s.Rating, float64(s.Hits)/float64(s.Count)*100, s.Count))
 		}
 	}
+	line("scorecard", joinOr(scores, " · ", fmt.Sprintf("%d open, none scored yet", r.OpenSignals)))
 	if len(r.MissedDecisions) > 0 {
-		fmt.Fprintf(&b, "\nMissed decisions: %s\n", strings.Join(r.MissedDecisions, ", "))
+		line("missed", strings.Join(r.MissedDecisions, ", "))
 	}
 	if r.Budget != nil {
-		fmt.Fprintf(&b, "\nLLM spend: today $%.2f of $%.2f · this month $%.2f of $%.2f (%d calls)", r.Budget.TodayUSD, r.Budget.DailyLimitUSD, r.Budget.MonthUSD, r.Budget.MonthlyLimitUSD, r.Budget.MonthCalls)
+		spend := fmt.Sprintf("today $%.2f/$%.2f · month $%.2f/$%.2f", r.Budget.TodayUSD, r.Budget.DailyLimitUSD, r.Budget.MonthUSD, r.Budget.MonthlyLimitUSD)
 		if r.Budget.UnresolvedUSD > 0 {
-			fmt.Fprintf(&b, " · unresolved $%.2f", r.Budget.UnresolvedUSD)
+			spend += fmt.Sprintf(" · unresolved $%.2f", r.Budget.UnresolvedUSD)
 		}
-		b.WriteString("\n")
+		line("spend", spend)
 	}
 	return b.String()
+}
+
+func joinOr(items []string, sep, empty string) string {
+	if len(items) == 0 {
+		return empty
+	}
+	return strings.Join(items, sep)
 }

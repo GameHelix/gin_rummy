@@ -420,11 +420,10 @@ func (a *Agent) Daemon(ctx context.Context) error {
 			wake = a.now().Add(10 * time.Minute)
 			a.logf("%s cycle failed, retrying at %s: %v", a.now().Format(time.RFC3339), wake.In(newYork).Format("Jan 2 15:04 MST"), err)
 		default:
-			a.logf("%s cycle for %s: %s", a.now().Format(time.RFC3339), rep.Session, rep.Status)
 			if wake, err = NextCycleTime(a.now(), a.Config.CloseBuffer()); err != nil {
 				return &PermanentError{err}
 			}
-			a.logf("next cycle at %s", wake.In(newYork).Format("Mon Jan 2 15:04 MST"))
+			a.logf("%s %s %s · next %s", a.now().UTC().Format("2006-01-02 15:04Z"), rep.Session, rep.Status, wake.In(newYork).Format("Mon Jan 2 15:04 MST"))
 		}
 		if err := a.waitUntil(ctx, sleep, wake); err != nil {
 			return err

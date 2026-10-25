@@ -470,7 +470,6 @@ func (a *Analyst) call(ctx context.Context, in AnalystInput, params anthropic.Be
 		if err := a.Budget.Dispatch(ctx, att.ID); err != nil {
 			return nil, 0, err
 		}
-		a.logf("analyst: %s (attempt %d)", purpose, attempt)
 		resp, err := a.Client.Beta.Messages.New(ctx, params, option.WithMaxRetries(0))
 		persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		if err == nil {

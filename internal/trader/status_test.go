@@ -27,7 +27,7 @@ func TestStatusComparesAgainstBuyAndHold(t *testing.T) {
 		t.Fatalf("drawdowns: %v %v", r.Agent.MaxDrawdown, r.Benchmark.MaxDrawdown)
 	}
 	text := r.Text()
-	for _, want := range []string{"ahead of buy-and-hold by 4.00 percentage points", "AAA", "strong_buy", "this month $2.00 of $40.00 (9 calls)", "Next cycle: Wed Oct 28 16:30"} {
+	for _, want := range []string{"next Wed Oct 28 16:30", "agent      $10200.00  +2.00%", "buy&hold   $9800.00  -2.00%", "positions  AAA 40", "ratings    AAA strong_buy (2026-10-27)", "spend      today $0.40/$3.00 · month $2.00/$40.00"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("status text lacks %q:\n%s", want, text)
 		}

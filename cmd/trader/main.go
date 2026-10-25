@@ -22,23 +22,18 @@ import (
 	"github.com/ismatsamadov/trader/internal/trader"
 )
 
-const usage = `trader — a real-time paper-trading agent for US stocks
+const usage = `trader — real-time paper-trading agent for US stocks (no real orders)
 
-After each NYSE close, the analyst model researches the universe with live tools (price
-history and news) and rates every stock. Deterministic rules turn the ratings
-into orders that fill at the next open in a local paper account, next to a
-buy-and-hold benchmark. No real orders are ever sent.
+  trader init                  create the paper account
+  trader run [--dry-run]       run one cycle now
+  trader daemon                run a cycle after every close
+  trader status [--json]       agent vs buy-and-hold
+  trader budget status
+  trader budget resolve --attempt ID --cost-usd N --note TEXT
+  trader models                list model IDs for TRADER_MODEL
 
-Commands:
-  trader init     [--config PATH]             create the paper account
-  trader run      [--config PATH] [--dry-run] run one cycle now (no-op when up to date)
-  trader daemon   [--config PATH]             run a cycle after every session close
-  trader status   [--config PATH] [--json]    agent vs benchmark, positions, scorecard
-  trader budget   status  [--config PATH]
-  trader budget   resolve [--config PATH] --attempt ID --cost-usd N --note TEXT
-  trader models                               list models available to your API key
-
-The default config is config/agent.json. Put ANTHROPIC_API_KEY and TRADER_MODEL in .env.`
+All commands take --config PATH (default config/agent.json).
+Secrets go in .env: ANTHROPIC_API_KEY and TRADER_MODEL.`
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -129,10 +124,10 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "Created paper account %q with $%.2f at %s.\nNext: `trader run --dry-run` to check live data, then `trader run` or `trader daemon`.\n", st.Name, st.InitialCash.Dollars(), trader.StatePath(c))
+		fmt.Fprintf(out, "created %s: $%.2f paper cash (%s)\n", st.Name, st.InitialCash.Dollars(), trader.StatePath(c))
 		return nil
 	case "run":
-		agent, err := newAgent(c, budget, e, out, !*dryRun)
+		agent, err := newAgent(c, budget, e, nil, !*dryRun)
 		if err != nil {
 			return err
 		}
@@ -147,7 +142,7 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		if _, err := agent.Analyst.Client.Models.Get(ctx, c.Model, anthropic.ModelGetParams{}); err != nil {
 			return fmt.Errorf("TRADER_MODEL is not available to this API key (see `trader models`): %w", err)
 		}
-		fmt.Fprintf(out, "trader daemon: %s. Press Ctrl-C to stop.\n", c.Name)
+		fmt.Fprintf(out, "trader daemon: %s\n", c.Name)
 		return agent.Daemon(ctx)
 	case "status":
 		st, err := trader.LoadState(c)
@@ -198,14 +193,15 @@ func anthropicClient(key string, e env) anthropic.Client {
 	return anthropic.NewClient(opts...)
 }
 
-func newAgent(c trader.Config, budget *trader.Budget, e env, out io.Writer, withAnalyst bool) (*trader.Agent, error) {
-	agent := &trader.Agent{Config: c, Market: trader.MarketSource{HTTP: e.HTTP, BaseURL: e.MarketURL}, Now: e.Now, Sleep: e.Sleep, Log: out}
+// newAgent wires the agent; log is nil for one-off runs, which print only a summary.
+func newAgent(c trader.Config, budget *trader.Budget, e env, log io.Writer, withAnalyst bool) (*trader.Agent, error) {
+	agent := &trader.Agent{Config: c, Market: trader.MarketSource{HTTP: e.HTTP, BaseURL: e.MarketURL}, Now: e.Now, Sleep: e.Sleep, Log: log}
 	if withAnalyst {
 		key := apiKey()
 		if key == "" {
 			return nil, errors.New("set ANTHROPIC_API_KEY in .env or the environment to run the analyst")
 		}
-		agent.Analyst = &trader.Analyst{Config: c, Client: anthropicClient(key, e), News: trader.NewsSource{HTTP: e.HTTP, BaseURL: e.NewsURL}, Budget: budget, Log: out, Sleep: e.Sleep}
+		agent.Analyst = &trader.Analyst{Config: c, Client: anthropicClient(key, e), News: trader.NewsSource{HTTP: e.HTTP, BaseURL: e.NewsURL}, Budget: budget, Log: log, Sleep: e.Sleep}
 	}
 	return agent, nil
 }
@@ -228,43 +224,48 @@ func printCycle(out io.Writer, rep trader.CycleReport) {
 	if rep.Status == "" {
 		return
 	}
-	fmt.Fprintf(out, "\nCycle for %s: %s\n", rep.Session, strings.ReplaceAll(rep.Status, "_", " "))
-	for _, e := range rep.CorporateEvents {
-		fmt.Fprintf(out, "  corporate action: %s\n", e)
+	head := rep.Session + " · " + strings.ReplaceAll(rep.Status, "_", " ")
+	if d := rep.Decision; d != nil {
+		head += fmt.Sprintf(" · cost $%.2f", d.CostUSD)
+	}
+	fmt.Fprintln(out, head)
+	item := func(label, value string) { fmt.Fprintf(out, "  %-9s %s\n", label+":", value) }
+	if b := rep.Briefing; b != nil {
+		closes := []string{}
+		for _, ind := range b.Universe {
+			closes = append(closes, fmt.Sprintf("%s %.2f", ind.Symbol, ind.Close))
+		}
+		if b.Market != nil {
+			closes = append(closes, fmt.Sprintf("%s %.2f", b.Market.Symbol, b.Market.Close))
+		}
+		item("data", strings.Join(closes, " · ")+" (no model call, nothing saved)")
 	}
 	for _, f := range rep.Fills {
-		fmt.Fprintf(out, "  filled %s %d %s @ $%.2f on %s (fee $%.2f)\n", strings.ToUpper(f.Side), f.Quantity, f.Symbol, f.Price.Dollars(), f.Session, f.Fee.Dollars())
+		item("filled", fmt.Sprintf("%s %d %s @ $%.2f on %s", strings.ToUpper(f.Side), f.Quantity, f.Symbol, f.Price.Dollars(), f.Session))
 	}
 	for _, r := range rep.Rejections {
-		fmt.Fprintf(out, "  rejected %s on %s: %s\n", r.Symbol, r.Session, r.Reason)
+		item("rejected", fmt.Sprintf("%s on %s: %s", r.Symbol, r.Session, r.Reason))
 	}
-	if b := rep.Briefing; b != nil {
-		fmt.Fprintf(out, "  dry run: live data is ready; the analyst would receive this briefing (no model call, nothing saved)\n")
-		for _, ind := range b.Universe {
-			fmt.Fprintf(out, "  %-6s close %9.2f  5d %+6.2f%%  20d %+6.2f%%  60d %+6.2f%%  vol20 %.2f%%\n", ind.Symbol, ind.Close, ind.Return5D*100, ind.Return20D*100, ind.Return60D*100, ind.Volatility20D*100)
-		}
-		if m := b.Market; m != nil {
-			fmt.Fprintf(out, "  market %-4s close %9.2f  5d %+6.2f%%  20d %+6.2f%%\n", m.Symbol, m.Close, m.Return5D*100, m.Return20D*100)
-		}
+	for _, e := range rep.CorporateEvents {
+		item("event", e)
 	}
 	if d := rep.Decision; d != nil {
-		if d.Summary != "" {
-			fmt.Fprintf(out, "  view: %s\n", d.Summary)
-		}
+		ratings := []string{}
 		for _, line := range d.Plan {
-			sig := d.Signals[line.Symbol]
-			fmt.Fprintf(out, "  %-6s %-11s (%s) %s\n", line.Symbol, line.Rating, sig.Confidence, sig.Rationale)
+			ratings = append(ratings, line.Symbol+" "+string(line.Rating))
 		}
-		if len(rep.Orders) == 0 {
-			fmt.Fprintln(out, "  no orders: every change was a hold or inside the no-trade band")
-		}
+		item("ratings", strings.Join(ratings, " · "))
+		orders := []string{}
 		for _, o := range rep.Orders {
-			fmt.Fprintf(out, "  order for next open: %s %d %s (%s)\n", strings.ToUpper(o.Side), o.Quantity, o.Symbol, o.Reason)
+			orders = append(orders, fmt.Sprintf("%s %d %s", strings.ToUpper(o.Side), o.Quantity, o.Symbol))
 		}
-		fmt.Fprintf(out, "  estimated model cost: $%.4f\n", d.CostUSD)
+		if len(orders) == 0 {
+			orders = append(orders, "none")
+		}
+		item("orders", strings.Join(orders, ", "))
 	}
 	for _, n := range rep.Notes {
-		fmt.Fprintf(out, "  note: %s\n", n)
+		item("note", n)
 	}
 }
 
