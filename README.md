@@ -5,7 +5,7 @@ An AI crypto trading agent for Binance spot. It watches BTC and ETH around the c
 ## Setup
 
 1. **Binance:** create an API key with spot trading on and withdrawals off, ideally restricted to your IP. For a trial run, use testnet keys from testnet.binance.vision.
-2. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money. `POSTGRES_PASSWORD` protects the engine's database. `ENGINE_MASTER_KEY` (`openssl rand -base64 32`) encrypts the keys stored there; back it up, because without it they cannot be read. `ENGINE_API_TOKEN` (`openssl rand -hex 32`) opens the engine API.
+2. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money. `POSTGRES_PASSWORD` protects the engine's database. `ENGINE_MASTER_KEY` (`openssl rand -base64 32`) encrypts the keys stored there; back it up, because without it they cannot be read. `ENGINE_API_TOKEN` (`openssl rand -hex 32`) opens the engine API. A user's model and exchange keys are not settings: they go in through the app, into the vault. Only a standalone run (`check`, `init`, `import`, `run`) reads `ANTHROPIC_API_KEY`, `BINANCE_API_KEY` and `BINANCE_API_SECRET` from `.env`.
 
 ```sh
 mkdir -p data                           # on Linux: sudo chown 65532 data
@@ -38,10 +38,10 @@ trader agent list --tenant ID
 Any server prepared by [candylario/infra](https://github.com/candylario/infra), at any cloud or your own, runs the engine:
 
 ```sh
-./deploy.sh deploy@SERVER_IP   # builds for the server's CPU; ships the image, compose.yaml, config/ and .env over SSH
+./deploy.sh deploy@SERVER_IP   # builds for the server's CPU; ships the image, compose.yaml, config/ and the settings over SSH
 ```
 
-Data and the database stay on the server. Allow the server's IP on the Binance key. `./move.sh deploy@SERVER_IP` moves an engine running here to the server, database and data included, and stops it here.
+The settings come from the central `../.env` through `../infra/env.sh` when infra sits next to this repo, else from `.env`. Data and the database stay on the server. Allow the server's IP on the Binance key. `./move.sh deploy@SERVER_IP` moves an engine running here to the server, database and data included, and stops it here.
 
 ## Engine API
 
