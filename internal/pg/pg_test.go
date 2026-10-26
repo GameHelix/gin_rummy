@@ -161,14 +161,14 @@ func TestEventsReadBackInOrderAndAnnounceThemselves(t *testing.T) {
 		}
 		break
 	}
-	got, err := s.Events(ctx, a.Tenant, a.ID, 2, 2)
+	got, err := s.Events(ctx, a.Tenant, a.ID, 2, 2, nil)
 	if err != nil || len(got) != 2 || got[0].Seq != 3 || got[1].Seq != 4 {
 		t.Fatalf("events after 2: %+v %v", got, err)
 	}
 	if string(got[0].Body) != string(written[2].Body) || got[0].Sum() == nil || string(got[0].Sum()) != string(got[0].Hash) {
 		t.Fatalf("an event must read back exactly as hashed: %s", got[0].Body)
 	}
-	if other, _ := s.Events(ctx, uuid.New(), a.ID, 0, 10); len(other) != 0 {
+	if other, _ := s.Events(ctx, uuid.New(), a.ID, 0, 10, nil); len(other) != 0 {
 		t.Fatal("another tenant must not read the events")
 	}
 	cancel()

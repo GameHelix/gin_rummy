@@ -29,6 +29,7 @@ const (
 	evCommand         = "command.received"
 	evEquity          = "equity.hourly"
 	evCallGraded      = "call.graded"
+	evLessonRecorded  = "lesson.recorded"
 	evNewsAlert       = "news.alert"
 	evNotice          = "notice"
 )
@@ -149,6 +150,13 @@ type equityHourly struct {
 
 type newsAlert struct {
 	Items []news.Item `json:"items"`
+}
+
+// lessonRecorded is a lesson the model drew from a graded decision.
+type lessonRecorded struct {
+	Decision int            `json:"decision"`
+	Lesson   analyst.Lesson `json:"lesson"`
+	CostUSD  float64        `json:"review_cost_usd"`
 }
 
 // emit writes an event to the audit log. Callers that are about to act on

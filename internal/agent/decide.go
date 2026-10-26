@@ -87,11 +87,14 @@ func (e *Engine) finish(ctx context.Context, r result) error {
 	}
 	e.st.Decisions = keep(append(e.st.Decisions, d), 100)
 	if !res.Abstained {
+		// Every rating is graded at the horizon, holds included, and the
+		// lessons it relied on are graded with it.
 		horizon := time.Duration(c.ScoreHorizonHours) * time.Hour
 		for _, s := range c.Symbols {
-			if score, _ := res.Signals[s].Rating.Score(); score != 0 {
-				e.st.Open = append(e.st.Open, OpenCall{Decision: d.ID, Symbol: s, Rating: res.Signals[s].Rating, Entry: d.Prices[s], Due: d.Time.Add(horizon)})
-			}
+			sig := res.Signals[s]
+			cited := lessonsCited(sig.Evidence)
+			e.mem.cite(cited)
+			e.st.Open = append(e.st.Open, OpenCall{Decision: d.ID, Symbol: s, Rating: sig.Rating, Entry: d.Prices[s], Due: d.Time.Add(horizon), Lessons: cited})
 		}
 	}
 	if err := e.save(); err != nil {
@@ -174,17 +177,13 @@ func (e *Engine) snapshot(ctx context.Context, id int, trigger string, now time.
 	}
 	bench, _ := e.st.Benchmark.Equity(e.prices)
 	eq, capital := equity.Float(), e.st.Capital.Float()
-	right := 0
-	for _, sc := range e.st.Scored {
-		if sc.Hit {
-			right++
-		}
-	}
+	graded, right := tradeCalls(e.st.Scored)
 	b := analyst.Briefing{
 		DecisionID: "d" + strconv.Itoa(id), DecisionTime: now.Format(time.RFC3339), Trigger: trigger, HorizonHours: c.ScoreHorizonHours,
 		Account: analyst.Account{EquityUSD: round(eq, 2), CashWeight: round(e.st.Ledger.Cash.Float()/eq, 4), ReturnSinceStart: round(eq/capital-1, 4), BuyAndHoldReturn: round(bench.Float()/capital-1, 4),
-			FeeRate: e.st.TakerFee.Float(), CallsGraded: len(e.st.Scored), CallsRight: right},
+			FeeRate: e.st.TakerFee.Float(), CallsGraded: graded, CallsRight: right},
 		RecentCalls: e.recentCalls(5),
+		Lessons:     e.mem.brief(),
 		Headlines:   briefHeadlines(e.headlines, c.NewsItems, strings.TrimPrefix(trigger, newsTrigger)),
 	}
 	for _, s := range c.Symbols {

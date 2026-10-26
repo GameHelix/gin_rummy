@@ -96,7 +96,7 @@ func TestTierLimitsAndKeysAreEnforced(t *testing.T) {
 	if err := s.Start(ctx, tenant, id); err == nil {
 		t.Fatal("an agent cannot start without its keys")
 	}
-	for kind, raw := range map[string]string{KindAnthropic: `{"key":"k","secret":"s"}`, KindBinance: `{"key":"k"}`, KindTelegram: `{"token":"t"}`} {
+	for kind, raw := range map[string]string{KindAnthropic: `{"key":"k","secret":"s"}`, KindBinance: `{"key":"k"}`, "telegram": `{"token":"t"}`} {
 		if _, _, err := s.AddKey(ctx, tenant, NewKey{Kind: kind, Label: "bad", Mode: "testnet", Secret: []byte(raw)}); err == nil {
 			t.Fatalf("a malformed %s key must be refused", kind)
 		}
@@ -299,8 +299,8 @@ func TestNewVersionsAndKeysRestartAgentsAndRevokedKeysStopThem(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor("a restart on version 2", func() bool { v := got(); return len(v) == 2 && v[1] == 2 })
-	bot, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindTelegram, Label: "main", Secret: []byte(`{"token":"t","chat_id":1}`)})
-	s.AttachKey(ctx, tenant, agentID, bot.ID)
+	other, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: "other", Mode: "testnet", Secret: []byte(`{"key":"` + testkit.Key + `","secret":"` + testkit.Secret + `"}`)})
+	s.AttachKey(ctx, tenant, agentID, other.ID)
 	waitFor("a restart with the new key", func() bool { return len(got()) == 3 })
 	if stopped, err := s.RevokeKey(ctx, tenant, keys[KindAnthropic]); err != nil || len(stopped) != 1 {
 		t.Fatalf("revoking the model key stops its agent: %v %v", stopped, err)

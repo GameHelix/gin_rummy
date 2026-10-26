@@ -66,12 +66,7 @@ func BuildReport(c config.Config, st State, prices map[string]num.Dec, budget *a
 	if r.Last != nil {
 		r.NextAt, r.Ratings = r.Last.Time.Add(c.DecisionInterval()), ratings(c, r.Last)
 	}
-	for _, sc := range st.Scored {
-		r.Calls++
-		if sc.Hit {
-			r.Hits++
-		}
-	}
+	r.Calls, r.Hits = tradeCalls(st.Scored)
 	return r, nil
 }
 
@@ -260,7 +255,7 @@ func (e *Engine) tradeText(t Trade) string {
 var slashCommand = regexp.MustCompile(`(^|[\s(\[])/([A-Za-z])`)
 
 // untrusted defuses text written by the model or a third party before it
-// goes to Telegram: a "/command" in it would be one tap away from running.
+// goes to a chat: a "/command" in it would be one tap away from running.
 func untrusted(s string) string { return slashCommand.ReplaceAllString(s, "$1∕$2") }
 
 // usd formats dollars with cents and thousands separators.

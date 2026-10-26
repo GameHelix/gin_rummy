@@ -86,7 +86,6 @@ func (en Entitlements) Check(c config.Config) error {
 const (
 	KindAnthropic = "anthropic"
 	KindBinance   = "binance"
-	KindTelegram  = "telegram"
 )
 
 // Keys are an agent's decrypted secrets, held in memory only while it runs.
@@ -94,15 +93,11 @@ type Keys struct {
 	Anthropic     string
 	BinanceKey    string
 	BinanceSecret string
-	TelegramToken string
-	TelegramChat  int64
 }
 
 type secret struct {
 	Key    string `json:"key,omitempty"`
 	Secret string `json:"secret,omitempty"`
-	Token  string `json:"token,omitempty"`
-	ChatID int64  `json:"chat_id,omitempty"`
 }
 
 // parseSecret checks a key has exactly the fields its kind needs and returns
@@ -114,25 +109,19 @@ func parseSecret(kind string, raw []byte) (secret, string, error) {
 	if err := d.Decode(&s); err != nil {
 		return s, "", errors.New("the key must be JSON with the fields for its kind")
 	}
-	visible := s.Key
 	switch kind {
 	case KindAnthropic:
-		if s.Key == "" || s.Secret != "" || s.Token != "" {
+		if s.Key == "" || s.Secret != "" {
 			return s, "", errors.New(`an Anthropic key is {"key": "..."}`)
 		}
 	case KindBinance:
-		if s.Key == "" || s.Secret == "" || s.Token != "" {
+		if s.Key == "" || s.Secret == "" {
 			return s, "", errors.New(`a Binance key is {"key": "...", "secret": "..."}`)
 		}
-	case KindTelegram:
-		if s.Token == "" || s.ChatID == 0 || s.Key != "" {
-			return s, "", errors.New(`a Telegram bot is {"token": "...", "chat_id": 123}`)
-		}
-		visible = s.Token
 	default:
 		return s, "", fmt.Errorf("unknown key kind %q", kind)
 	}
-	return s, "…" + visible[max(0, len(visible)-4):], nil
+	return s, "…" + s.Key[max(0, len(s.Key)-4):], nil
 }
 
 // Service manages tenants, keys and agents. Check, when set, tries an
@@ -236,13 +225,10 @@ func owner(tenant, credential uuid.UUID, kind string) []byte {
 }
 
 func keysOf(kind string, s secret) Keys {
-	switch kind {
-	case KindAnthropic:
+	if kind == KindAnthropic {
 		return Keys{Anthropic: s.Key}
-	case KindBinance:
-		return Keys{BinanceKey: s.Key, BinanceSecret: s.Secret}
 	}
-	return Keys{TelegramToken: s.Token, TelegramChat: s.ChatID}
+	return Keys{BinanceKey: s.Key, BinanceSecret: s.Secret}
 }
 
 // NewKey is a key to store. ID is optional: a retry with the same ID
@@ -293,16 +279,15 @@ func (s *Service) AddKey(ctx context.Context, tenant uuid.UUID, k NewKey) (pg.Cr
 	return stored, err == nil, serr
 }
 
-// RevokeKey revokes a stored key. Agents that used it restart without it, or
-// stop if it was their Anthropic or Binance key; it returns those that
-// stopped. Revoking a revoked key does nothing.
+// RevokeKey revokes a stored key. Agents that used it stop, and are
+// returned. Revoking a revoked key does nothing.
 func (s *Service) RevokeKey(ctx context.Context, tenant, key uuid.UUID) ([]uuid.UUID, error) {
 	c, err := s.Store.Credential(ctx, tenant, key)
 	if err != nil || c.Revoked {
 		return nil, err
 	}
 	users, err := s.Store.RevokeCredential(ctx, tenant, key)
-	if err != nil || c.Kind == KindTelegram {
+	if err != nil {
 		return nil, err
 	}
 	for _, a := range users {
@@ -560,13 +545,10 @@ func (s *Service) Spec(ctx context.Context, tenant, agent uuid.UUID) (Spec, erro
 			return Spec{}, err
 		}
 		k := keysOf(kind, sec)
-		switch kind {
-		case KindAnthropic:
+		if kind == KindAnthropic {
 			spec.Keys.Anthropic = k.Anthropic
-		case KindBinance:
+		} else {
 			spec.Keys.BinanceKey, spec.Keys.BinanceSecret = k.BinanceKey, k.BinanceSecret
-		case KindTelegram:
-			spec.Keys.TelegramToken, spec.Keys.TelegramChat = k.TelegramToken, k.TelegramChat
 		}
 	}
 	return spec, nil

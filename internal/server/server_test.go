@@ -25,7 +25,6 @@ import (
 	"github.com/candylario/trader/internal/binance"
 	"github.com/candylario/trader/internal/fleet"
 	"github.com/candylario/trader/internal/pg"
-	"github.com/candylario/trader/internal/telegram"
 	"github.com/candylario/trader/internal/testkit"
 	"github.com/candylario/trader/internal/vault"
 )
@@ -35,12 +34,11 @@ const token = "test-token-0123456789abcdef0123456789"
 type rig struct {
 	t      *testing.T
 	ex     *testkit.Binance
-	tg     *testkit.Telegram
 	client *api.Client
 }
 
-// newRig runs an engine with its API against fake Binance, model and
-// Telegram servers and a fresh database.
+// newRig runs an engine with its API against fake Binance and model
+// servers and a fresh database.
 func newRig(t *testing.T) *rig {
 	url := testkit.Database(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -54,9 +52,9 @@ func newRig(t *testing.T) *rig {
 	master, _ := vault.NewMasterKey()
 	v, _ := vault.New(master, 1)
 	now := func() time.Time { return testkit.At(t, "2026-10-25 12:00") }
-	r := &rig{t: t, ex: testkit.NewBinance(now), tg: &testkit.Telegram{ChatID: 7, Now: now}}
+	r := &rig{t: t, ex: testkit.NewBinance(now)}
 	model := &testkit.API{WantKey: "sk-alice", Script: []func(string) (int, any){testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, testkit.CitePrices)}}
-	exURL, modelURL, tgURL := r.ex.Server(t).URL, model.Server(t).URL, r.tg.Server(t).URL
+	exURL, modelURL := r.ex.Server(t).URL, model.Server(t).URL
 	svc := &fleet.Service{Store: store, Vault: v, DataDir: t.TempDir(), Model: "test-model",
 		CheckKey: func(ctx context.Context, kind, mode string, k fleet.Keys) error {
 			if kind == fleet.KindAnthropic && k.Anthropic != "sk-alice" {
@@ -71,9 +69,6 @@ func newRig(t *testing.T) *rig {
 			Analyst: &analyst.Analyst{Config: c, Client: anthropic.NewClient(option.WithAPIKey(spec.Keys.Anthropic), option.WithBaseURL(modelURL)),
 				Sleep:  func(context.Context, time.Duration) error { return nil },
 				Budget: &analyst.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: now}}}
-		if spec.Keys.TelegramToken != "" {
-			e.Bot = &telegram.Bot{HTTP: http.DefaultClient, BaseURL: tgURL, Token: spec.Keys.TelegramToken, ChatID: spec.Keys.TelegramChat}
-		}
 		return e
 	}
 	sup := &fleet.Supervisor{Service: svc, Every: 50 * time.Millisecond, Logf: t.Logf,
@@ -106,10 +101,6 @@ func (r *rig) waitFor(what string, ok func() bool) {
 	}
 }
 
-func (r *rig) sent(substr string) bool {
-	return slices.ContainsFunc(r.tg.Sent(), func(m string) bool { return strings.Contains(m, substr) })
-}
-
 func code(err error) string {
 	var ae *api.Error
 	if errors.As(err, &ae) {
@@ -134,8 +125,8 @@ func agentConfig(t *testing.T, edit func(map[string]any)) json.RawMessage {
 var plan = api.Plan{Symbols: []string{"BTCUSDT", "ETHUSDT"}, MaxAgents: 2, MinDecisionIntervalHours: 1, MaxEventDecisionsPerDay: 8}
 
 // TestTheAppRunsAnAgentThroughTheAPI does through the API all that the
-// Telegram chat can, and what only the app can: tenants, plans, keys,
-// agents, configs and the audit log.
+// chat can, and what only the app can: tenants, plans, keys, agents,
+// configs and the audit log.
 func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 	r := newRig(t)
 	c := r.client
@@ -160,7 +151,6 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 	for _, k := range []api.NewKey{
 		{Kind: api.KindAnthropic, Label: "model", Secret: json.RawMessage(`{"key":"sk-alice"}`)},
 		{Kind: api.KindBinance, Label: "testnet", Mode: "testnet", Secret: json.RawMessage(`{"key":"` + testkit.Key + `","secret":"` + testkit.Secret + `"}`)},
-		{Kind: api.KindTelegram, Label: "phone", Secret: json.RawMessage(`{"token":"T","chat_id":7}`)},
 	} {
 		got, err := c.AddKey(ctx, tid, k)
 		if err != nil || got.Kind != k.Kind || got.Hint == "" {
@@ -169,13 +159,13 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 		keys = append(keys, got.ID)
 	}
 	listed, err := c.Keys(ctx, tid)
-	if raw, _ := json.Marshal(listed); err != nil || len(listed) != 3 || strings.Contains(string(raw), testkit.Secret) || strings.Contains(string(raw), "sk-alice") {
+	if raw, _ := json.Marshal(listed); err != nil || len(listed) != 2 || strings.Contains(string(raw), testkit.Secret) || strings.Contains(string(raw), "sk-alice") {
 		t.Fatalf("keys are listed without their secrets: %s %v", raw, err)
 	}
 
 	aid := uuid.Must(uuid.NewV7()).String()
 	ag, err := c.CreateAgent(ctx, tid, api.NewAgent{ID: aid, Name: "btc-eth", Mode: "testnet", Config: agentConfig(t, nil), Keys: keys})
-	if err != nil || ag.Status != "stopped" || ag.Version != 1 || len(ag.Keys) != 3 || ag.Running {
+	if err != nil || ag.Status != "stopped" || ag.Version != 1 || len(ag.Keys) != 2 || ag.Running {
 		t.Fatalf("agent: %+v %v", ag, err)
 	}
 	if list, err := c.Agents(ctx, tid); err != nil || len(list) != 1 || list[0].ID != aid {
@@ -201,6 +191,14 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 			out = append(out, e.Type)
 		}
 		return out
+	}
+	said := func(substr string) bool {
+		for _, e := range events() {
+			if e.Type == "notice" && strings.Contains(string(e.Payload), substr) {
+				return true
+			}
+		}
+		return false
 	}
 	sctx, stopStream := context.WithCancel(ctx)
 	defer stopStream()
@@ -240,9 +238,9 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 		}
 	}
 	r.waitFor("the sell-off", func() bool { return len(r.ex.OrderList()) == 2 })
-	r.waitFor("Telegram hearing of it", func() bool { return r.sent("Trading stopped") && r.sent("Selling everything") })
-	if r.sent("Send /resume first") {
-		t.Fatal("a refused command from the app is not announced on Telegram")
+	r.waitFor("the announcements", func() bool { return said("Trading stopped") && said("Selling everything") })
+	if said("Send /resume first") {
+		t.Fatal("a refused command is not announced")
 	}
 	if _, err := c.Command(ctx, tid, aid, api.Command{Command: "leverage_up"}); code(err) != "bad_request" {
 		t.Fatalf("unknown commands are refused: %v", err)

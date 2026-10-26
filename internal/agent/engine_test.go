@@ -20,7 +20,6 @@ import (
 	"github.com/candylario/trader/internal/config"
 	"github.com/candylario/trader/internal/news"
 	"github.com/candylario/trader/internal/num"
-	"github.com/candylario/trader/internal/telegram"
 	"github.com/candylario/trader/internal/testkit"
 )
 
@@ -31,10 +30,19 @@ type rig struct {
 	clock time.Time
 	ex    *testkit.Binance
 	api   *testkit.API
-	tg    *testkit.Telegram
+	log   logBuf
 	news  []testkit.Headline
 	eng   *Engine
 }
+
+// logBuf collects the engine's log lines.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) { l.mu.Lock(); defer l.mu.Unlock(); return l.b.Write(p) }
+func (l *logBuf) String() string              { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
 
 func (r *rig) now() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.clock }
 
@@ -50,14 +58,13 @@ func rate(btc, eth string) func(string) (int, any) {
 	return testkit.SubmitStep(map[string]string{"BTCUSDT": btc, "ETHUSDT": eth}, testkit.CitePrices)
 }
 
-// newRig starts a fresh testnet account against fake Binance, model,
-// news and Telegram servers. Each call to tick is one pass of the loop.
+// newRig starts a fresh testnet account against fake Binance, model and
+// news servers. Each call to tick is one pass of the loop.
 func newRig(t *testing.T, script ...func(string) (int, any)) *rig {
 	t.Helper()
 	r := &rig{t: t, clock: testkit.At(t, "2026-10-25 12:00")}
 	r.ex = testkit.NewBinance(r.now)
 	r.api = &testkit.API{Script: script}
-	r.tg = &testkit.Telegram{ChatID: 7, Now: r.now}
 	c := testkit.Config(t.TempDir())
 	feed := testkit.NewsServer(t, func() []testkit.Headline {
 		r.mu.Lock()
@@ -80,7 +87,7 @@ func newEngine(t *testing.T, c config.Config, r *rig) *Engine {
 		Analyst: &analyst.Analyst{Config: c, Client: testkit.Client(r.api.Server(t).URL), Sleep: func(context.Context, time.Duration) error { return nil },
 			Budget: &analyst.Budget{Path: filepath.Join(c.Dir(), "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: r.now}},
 		News: news.Feeds{HTTP: r.feed, URLs: c.NewsFeeds},
-		Bot:  &telegram.Bot{HTTP: http.DefaultClient, BaseURL: r.tg.Server(t).URL, Token: "T", ChatID: 7},
+		Log:  &r.log,
 		Now:  r.now,
 	}
 }
@@ -92,24 +99,41 @@ func (r *rig) open() {
 	}
 }
 
-// tick runs one pass of the loop and, like Run, finishes a decision it
-// started and handles commands that arrived meanwhile.
+// tick runs one pass of the loop and, like Run, finishes a decision or a
+// review it started, handles commands that arrived meanwhile and saves.
 func (r *rig) tick() {
 	ctx := context.Background()
 	r.eng.tick(ctx)
 	if r.eng.job != nil {
 		r.eng.finish(ctx, <-r.eng.results)
 	}
+	if r.eng.reviewing != nil {
+		r.eng.finishReview(ctx, <-r.eng.reviews)
+	}
 	r.eng.handleLater(ctx)
+	r.eng.saveOrAlert(ctx)
 }
 
+// sent reports whether a message with the text was recorded for the user.
 func (r *rig) sent(substr string) bool {
-	for _, m := range r.tg.Sent() {
-		if strings.Contains(m, substr) {
-			return true
+	return slices.ContainsFunc(r.notices(), func(m string) bool { return strings.Contains(m, substr) })
+}
+
+// notices lists the messages recorded for the user, in order.
+func (r *rig) notices() []string {
+	r.t.Helper()
+	events, err := audit.ReadAfter(EventsDir(r.eng.Config), 0, 100000)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	var out []string
+	for _, ev := range events {
+		var n notice
+		if ev.Type == evNotice && json.Unmarshal(ev.Body, &n) == nil {
+			out = append(out, n.Text)
 		}
 	}
-	return false
+	return out
 }
 
 // ledgerMatchesExchange checks the agent's ledger against the fake account,
@@ -143,7 +167,7 @@ func TestInitGivesTheAgentItsCapitalAndAHoldingTwin(t *testing.T) {
 	poor := &rig{t: t, clock: r.clock}
 	poor.ex = testkit.NewBinance(poor.now)
 	poor.ex.SetBalance("USDT", num.Int(50))
-	poor.api, poor.tg = &testkit.API{}, &testkit.Telegram{ChatID: 7, Now: poor.now}
+	poor.api = &testkit.API{}
 	if _, err := newEngine(t, testkit.Config(t.TempDir()), poor).Init(context.Background()); err == nil || !strings.Contains(err.Error(), "capital_usd needs") {
 		t.Fatalf("init without the capital must fail: %v", err)
 	}
@@ -158,11 +182,11 @@ func TestScheduledDecisionTradesOnBinanceAndReports(t *testing.T) {
 	}
 	r.ledgerMatchesExchange()
 	st := r.eng.st
-	if len(st.Decisions) != 1 || len(st.Trades) != 1 || len(st.Pending) != 0 || len(st.Open) != 1 || st.NextID != 2 || st.Ledger.FeesUSD.Sign() <= 0 {
+	if len(st.Decisions) != 1 || len(st.Trades) != 1 || len(st.Pending) != 0 || len(st.Open) != 2 || st.NextID != 2 || st.Ledger.FeesUSD.Sign() <= 0 {
 		t.Fatalf("state after the decision: %+v", st)
 	}
 	if !r.sent("🧠 Decision #1: scheduled check") || !r.sent("Bought 0.0005") || !r.sent("🧪") {
-		t.Fatalf("telegram: %q", r.tg.Sent())
+		t.Fatalf("notices: %q", r.notices())
 	}
 	saved, err := LoadState(r.eng.Config)
 	if err != nil || saved.Ledger.Cash.Cmp(st.Ledger.Cash) != 0 {
@@ -240,12 +264,12 @@ func TestRejectedOrderIsReportedAndNotRetried(t *testing.T) {
 	}
 }
 
-func TestStopFromTelegramBlocksOrdersOfARunningDecision(t *testing.T) {
+func TestStopDuringADecisionBlocksItsOrders(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "strong_buy"))
-	r.eng.inbox <- inbound{name: "stop", source: sourceTelegram, sent: r.now(), offset: 3, received: r.now()}
+	r.eng.inbox <- inbound{name: "stop", sent: r.now(), received: r.now()}
 	r.tick()
 	r.eng.handleLater(context.Background())
-	if len(r.eng.st.Decisions) != 1 || len(r.ex.OrderList()) != 0 || r.eng.st.HaltKind != haltManual || r.eng.st.TelegramOffset != 3 {
+	if len(r.eng.st.Decisions) != 1 || len(r.ex.OrderList()) != 0 || r.eng.st.HaltKind != haltManual {
 		t.Fatalf("a stop sent during the decision must block its orders: orders %v, halt %q", r.ex.OrderList(), r.eng.st.Halted)
 	}
 	r.advance(5 * time.Hour)
@@ -253,10 +277,10 @@ func TestStopFromTelegramBlocksOrdersOfARunningDecision(t *testing.T) {
 	if r.api.Count() != 1 {
 		t.Fatal("no decisions while stopped")
 	}
-	r.eng.handle(context.Background(), inbound{name: "resume", source: sourceTelegram, sent: r.now()})
-	r.eng.handle(context.Background(), inbound{name: "status", source: sourceTelegram, sent: r.now()})
-	if r.eng.st.Halted != "" || !r.sent("Trading resumed.") || !r.sent("Account: $100.00") {
-		t.Fatalf("resume or status failed: %q", r.tg.Sent())
+	r.command("resume")
+	rep, err := r.eng.report(context.Background())
+	if err != nil || r.eng.st.Halted != "" || !r.sent("Trading resumed.") || rep.Equity.String() != "100" {
+		t.Fatalf("resume or status failed: %v %q", err, r.notices())
 	}
 }
 
@@ -264,29 +288,14 @@ func TestStaleCommandsAreIgnoredExceptStop(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "hold"))
 	r.tick()
 	old := r.now().Add(-time.Hour)
-	r.eng.handle(context.Background(), inbound{name: "sellall", source: sourceTelegram, sent: old, received: r.now()})
-	if r.eng.st.Halted != "" || len(r.ex.OrderList()) != 1 || !r.sent("Ignored /sellall") {
-		t.Fatal("a sell-all queued while offline must not run")
+	reply := make(chan Reply, 1)
+	r.eng.handle(context.Background(), inbound{name: "sellall", sent: old, received: r.now(), reply: reply})
+	if got := <-reply; r.eng.st.Halted != "" || len(r.ex.OrderList()) != 1 || got.OK || !strings.Contains(got.Text, "Ignored /sellall") || r.sent("Ignored /sellall") {
+		t.Fatalf("a sell-all queued while offline must not run, and its refusal goes to the caller only: %+v", got)
 	}
-	r.eng.handle(context.Background(), inbound{name: "stop", source: sourceTelegram, sent: old, received: r.now()})
+	r.eng.handle(context.Background(), inbound{name: "stop", sent: old, received: r.now()})
 	if r.eng.st.HaltKind != haltManual {
 		t.Fatal("a stop is honoured even late")
-	}
-}
-
-func TestTelegramPollerDeliversCommands(t *testing.T) {
-	r := newRig(t)
-	r.tg.Command("/status")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r.eng.poll(ctx, 0)
-	select {
-	case in := <-r.eng.inbox:
-		if in.name != "status" || in.offset != 2 {
-			t.Fatalf("got %+v", in)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no command delivered")
 	}
 }
 
@@ -311,7 +320,7 @@ func TestDrawdownSellsEverythingAndStops(t *testing.T) {
 	if r.api.Count() != 1 {
 		t.Fatal("no decisions after a drawdown stop")
 	}
-	r.eng.handle(context.Background(), inbound{name: "resume", source: sourceTelegram, sent: r.now()})
+	r.command("resume")
 	r.advance(time.Minute)
 	r.tick()
 	if r.eng.st.HaltKind == haltDrawdown || r.api.Count() != 2 {
@@ -375,7 +384,7 @@ func TestLiveModeRefusesKeysThatCanWithdraw(t *testing.T) {
 	r := &rig{t: t, clock: testkit.At(t, "2026-10-25 12:00")}
 	r.ex = testkit.NewBinance(r.now)
 	r.ex.SetRestriction("enableWithdrawals", true)
-	r.api, r.tg = &testkit.API{}, &testkit.Telegram{ChatID: 7, Now: r.now}
+	r.api = &testkit.API{}
 	c := testkit.Config(t.TempDir())
 	c.Mode = config.Live
 	if _, err := newEngine(t, c, r).Init(context.Background()); err == nil || !strings.Contains(err.Error(), "can withdraw") {
@@ -464,15 +473,15 @@ func TestSpentBudgetWaitsForTheNextDay(t *testing.T) {
 	r.eng.Analyst.Budget.DailyUSD = 0.0001
 	r.tick()
 	if r.api.Count() != 0 || !r.sent("LLM spending limit reached") {
-		t.Fatalf("the first decision must stop at the cap: %q", r.tg.Sent())
+		t.Fatalf("the first decision must stop at the cap: %q", r.notices())
 	}
-	alerts := len(r.tg.Sent())
+	alerts := len(r.notices())
 	for i := 0; i < 23; i++ {
 		r.advance(30 * time.Minute)
 		r.tick()
 	}
-	if len(r.tg.Sent()) != alerts {
-		t.Fatalf("no retries or repeated alerts before the UTC day ends: %q", r.tg.Sent()[alerts:])
+	if len(r.notices()) != alerts {
+		t.Fatalf("no retries or repeated alerts before the UTC day ends: %q", r.notices()[alerts:])
 	}
 	r.eng.Analyst.Budget.DailyUSD = 5
 	r.advance(30 * time.Minute)
@@ -482,15 +491,19 @@ func TestSpentBudgetWaitsForTheNextDay(t *testing.T) {
 	}
 }
 
-func (r *rig) command(name string) {
-	r.eng.handle(context.Background(), inbound{name: name, source: sourceTelegram, sent: r.now(), received: r.now()})
+// command runs a user command as the engine API would and returns the
+// answer.
+func (r *rig) command(name string) Reply {
+	reply := make(chan Reply, 1)
+	r.eng.handle(context.Background(), inbound{name: name, sent: r.now(), received: r.now(), reply: reply})
 	r.eng.handleLater(context.Background())
+	return <-reply
 }
 
 func TestASecondSellAllNeverSellsTwice(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "strong_buy"))
 	r.tick()
-	r.eng.inbox <- inbound{name: "sellall", source: sourceTelegram, sent: r.now(), received: r.now()}
+	r.eng.inbox <- inbound{name: "sellall", sent: r.now(), received: r.now()}
 	r.command("sellall")
 	orders := r.ex.OrderList()
 	ids := map[string]bool{}
@@ -505,7 +518,7 @@ func TestASecondSellAllNeverSellsTwice(t *testing.T) {
 	}
 	r.ledgerMatchesExchange()
 	if !r.sent("Everything sellable is sold") {
-		t.Fatalf("telegram: %q", r.tg.Sent())
+		t.Fatalf("notices: %q", r.notices())
 	}
 }
 
@@ -554,9 +567,9 @@ func TestNoDecisionWhileAnOrderIsUnresolved(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "hold"))
 	r.ex.SetFault(testkit.FaultDropBefore)
 	r.tick()
-	r.command("decide")
-	if r.api.Count() != 1 || len(r.ex.OrderList()) != 0 || !r.sent("an earlier order is still being checked") {
-		t.Fatalf("calls %d, orders %v", r.api.Count(), r.ex.OrderList())
+	got := r.command("decide")
+	if r.api.Count() != 1 || len(r.ex.OrderList()) != 0 || got.OK || !strings.Contains(got.Text, "an earlier order is still being checked") {
+		t.Fatalf("calls %d, orders %v, answer %+v", r.api.Count(), r.ex.OrderList(), got)
 	}
 }
 
@@ -637,7 +650,7 @@ func TestPartialFillIsBooked(t *testing.T) {
 	r.ledgerMatchesExchange()
 }
 
-func TestModelTextCannotCarryTelegramCommands(t *testing.T) {
+func TestModelTextCannotCarryChatCommands(t *testing.T) {
 	if got := untrusted("Rate it (/sellall) or /resume now; 1/2 is fine"); got != "Rate it (∕sellall) or ∕resume now; 1/2 is fine" {
 		t.Fatalf("got %q", got)
 	}
@@ -654,7 +667,7 @@ func TestDrawdownUnderAManualStopSellsNothingButSaysSo(t *testing.T) {
 	r.tick()
 	r.tick()
 	if len(r.ex.OrderList()) != 2 || r.eng.st.Liquidate || r.eng.st.HaltKind != haltManual || !r.sent("You stopped trading, so nothing is sold") {
-		t.Fatalf("a manual stop keeps holdings but reports the drawdown: orders %v, %q", r.ex.OrderList(), r.tg.Sent())
+		t.Fatalf("a manual stop keeps holdings but reports the drawdown: orders %v, %q", r.ex.OrderList(), r.notices())
 	}
 }
 
@@ -694,7 +707,7 @@ func TestSellOffGivesUpOnACoinBinanceKeepsRejecting(t *testing.T) {
 		r.tick()
 	}
 	if r.ex.RejectedCount() != sellTries || !r.sent("Could not sell BTC after 3 tries") || !r.sent("Sell-off finished, except BTC") || r.eng.st.Liquidate {
-		t.Fatalf("rejections %d, liquidate %v, %q", r.ex.RejectedCount(), r.eng.st.Liquidate, r.tg.Sent())
+		t.Fatalf("rejections %d, liquidate %v, %q", r.ex.RejectedCount(), r.eng.st.Liquidate, r.notices())
 	}
 	if orders := r.ex.OrderList(); len(orders) != 3 || orders[2].Symbol != "ETHUSDT" {
 		t.Fatalf("ETH must still be sold: %v", orders)
@@ -706,7 +719,7 @@ func TestOrderThatExpiresUnfilledIsReported(t *testing.T) {
 	r.ex.SetFault(testkit.FaultExpireEmpty)
 	r.tick()
 	if len(r.eng.st.Pending) != 0 || len(r.eng.st.Trades) != 0 || r.eng.st.Ledger.Cash.String() != "100" || !r.sent("expired without filling") {
-		t.Fatalf("pending %v, %q", r.eng.st.Pending, r.tg.Sent())
+		t.Fatalf("pending %v, %q", r.eng.st.Pending, r.notices())
 	}
 }
 
@@ -725,13 +738,14 @@ func TestCommandsAreAnsweredWhileTheModelThinks(t *testing.T) {
 		t.Helper()
 		for deadline := time.Now().Add(5 * time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
 			if time.Now().After(deadline) {
-				t.Fatalf("timed out waiting for %s: %q", what, r.tg.Sent())
+				t.Fatalf("timed out waiting for %s: %q", what, r.notices())
 			}
 		}
 	}
 	waitFor("the model call", func() bool { return r.api.Count() == 1 })
-	r.tg.Command("/status")
-	waitFor("the status reply", func() bool { return r.sent("📊 Status") })
+	if st, err := r.eng.Status(ctx); err != nil || st.Trades != 0 {
+		t.Fatalf("status must be answered while the model thinks: %+v %v", st, err)
+	}
 	if r.sent("🧠 Decision #1") {
 		t.Fatal("the decision cannot be done yet")
 	}
@@ -743,23 +757,23 @@ func TestCommandsAreAnsweredWhileTheModelThinks(t *testing.T) {
 	}
 }
 
-func TestEngineAPICommandsRunInTheLoopLikeTelegramOnes(t *testing.T) {
+func TestEngineAPICommandsRunInTheLoop(t *testing.T) {
 	r := newRig(t, rate("strong_buy", "hold"))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- r.eng.Run(ctx) }()
 	for deadline := time.Now().Add(5 * time.Second); len(r.ex.OrderList()) != 1; time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatalf("no first trade: %q", r.tg.Sent())
+			t.Fatalf("no first trade: %q", r.notices())
 		}
 	}
 	// After one answer the loop has said all it had to say.
 	if _, err := r.eng.Status(ctx); err != nil {
 		t.Fatal(err)
 	}
-	messages := len(r.tg.Sent())
+	messages := len(r.notices())
 	st, err := r.eng.Status(ctx)
-	if err != nil || st.Trades != 1 || st.Halted != "" || len(r.tg.Sent()) != messages {
+	if err != nil || st.Trades != 1 || st.Halted != "" || len(r.notices()) != messages {
 		t.Fatalf("status is read quietly: %+v %v", st, err)
 	}
 	for _, step := range []struct {
@@ -778,12 +792,12 @@ func TestEngineAPICommandsRunInTheLoopLikeTelegramOnes(t *testing.T) {
 		}
 	}
 	// The loop announces before it takes the next command, so once the
-	// last answer is on Telegram the earlier ones are too.
+	// last answer is recorded the earlier ones are too.
 	if _, err := r.eng.Status(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if !r.sent("Trading stopped") || !r.sent("Trading resumed") || !r.sent("Selling everything") || r.sent("Send /resume first") {
-		t.Fatalf("only commands that took effect are announced on Telegram: %q", r.tg.Sent())
+		t.Fatalf("only commands that took effect are announced: %q", r.notices())
 	}
 	if orders := r.ex.OrderList(); len(orders) != 2 || orders[1].Side != "SELL" {
 		t.Fatalf("the sell-off runs at once: %v", orders)
@@ -808,17 +822,6 @@ func TestEngineAPICommandsRunInTheLoopLikeTelegramOnes(t *testing.T) {
 	}
 	if strings.Join(fromAPI, " ") != "stop decide resume sellall" || events[len(events)-1].Type != evAgentStopped {
 		t.Fatalf("commands on record: %v, last event %s", fromAPI, events[len(events)-1].Type)
-	}
-	// Each message Telegram got is on record as a notice, in the same order.
-	var notices []string
-	for _, ev := range events {
-		var n notice
-		if ev.Type == evNotice && json.Unmarshal(ev.Body, &n) == nil {
-			notices = append(notices, n.Text)
-		}
-	}
-	if !slices.Equal(notices, r.tg.Sent()) {
-		t.Fatalf("notices %q\ndiffer from Telegram %q", notices, r.tg.Sent())
 	}
 }
 
@@ -941,7 +944,7 @@ func TestEveryStepIsOnRecordBeforeItHappens(t *testing.T) {
 	// After a restart the chain continues.
 	r.eng = newEngine(t, r.eng.Config, r)
 	r.open()
-	r.command("status")
+	r.command("stop")
 	if last, err := audit.Verify(EventsDir(r.eng.Config)); err != nil || last.Type != evNotice {
 		t.Fatalf("chain after restart, ending with the reply: %v %+v", err, last)
 	}
@@ -954,7 +957,132 @@ func TestNothingHappensThatCannotBeRecorded(t *testing.T) {
 	os.Chmod(dir, 0o500)
 	t.Cleanup(func() { os.Chmod(dir, 0o700) })
 	r.tick()
-	if r.api.Count() != 0 || len(r.ex.OrderList()) != 0 || !r.sent("Decision skipped") {
-		t.Fatalf("no model call or order may happen off the record: calls %d, orders %v", r.api.Count(), r.ex.OrderList())
+	if r.api.Count() != 0 || len(r.ex.OrderList()) != 0 || !strings.Contains(r.log.String(), "Decision skipped") {
+		t.Fatalf("no model call or order may happen off the record: calls %d, orders %v\n%s", r.api.Count(), r.ex.OrderList(), r.log.String())
+	}
+}
+
+// reviewing answers decisions with the ratings and reviews with a lesson
+// about BTC; a rating cites the lesson once the briefing carries it.
+func reviewing(btc, eth, lesson string) func(string) (int, any) {
+	return func(req string) (int, any) {
+		if testkit.IsReview(req) {
+			return testkit.LessonsStep(map[string]any{"text": lesson, "symbols": []string{"BTCUSDT"}, "supersedes": ""})(req)
+		}
+		return testkit.SubmitStep(map[string]string{"BTCUSDT": btc, "ETHUSDT": eth}, func(req, sym string) []string {
+			ids := []string{"prices:" + sym}
+			if sym == "BTCUSDT" && strings.Contains(req, "lesson:1") {
+				ids = append(ids, "lesson:1")
+			}
+			return ids
+		})(req)
+	}
+}
+
+func TestGradedCallsTeachLessonsThatLaterBriefingsCarry(t *testing.T) {
+	r := newRig(t, reviewing("strong_buy", "hold", "BTC buys inside a 5% weekly range tend to stall; wait for a daily close above the 20-day average."))
+	r.tick()
+	entry := r.eng.st.Open[0].Entry
+	r.advance(10 * time.Hour)
+	r.ex.SetPrice("BTCUSDT", entry.Float()*1.02)
+	r.advance(15 * time.Hour)
+	r.tick()
+	// Both ratings are graded, the hold included, and the model reviewed
+	// the decision while the next one was being made.
+	if n := len(r.eng.st.Scored); n != 2 || !r.eng.st.Scored[0].Hit || !r.eng.st.Scored[1].Hit || len(r.eng.st.Decisions) != 2 {
+		t.Fatalf("graded calls: %+v", r.eng.st.Scored)
+	}
+	if len(r.eng.mem.Lessons) != 1 || r.eng.mem.Lessons[0].ID != "lesson:1" || len(r.eng.st.Reviews) != 0 || !r.sent("📒 Lessons from decision #1 (BTC STRONG BUY ✓ +2.0%, ETH HOLD ✓") {
+		t.Fatalf("lessons %+v, queue %v, notices %q", r.eng.mem.Lessons, r.eng.st.Reviews, r.notices())
+	}
+	if saved, err := loadMemory(r.eng.Config); err != nil || len(saved.Lessons) != 1 {
+		t.Fatalf("memory must be saved: %v", err)
+	}
+	if rep, _ := r.eng.report(context.Background()); rep.Calls != 1 || rep.Hits != 1 {
+		t.Fatalf("the track record counts buy and sell calls only: %d of %d", rep.Hits, rep.Calls)
+	}
+	// The next briefing carries the lesson, and the rating that cites it
+	// remembers that.
+	r.advance(4 * time.Hour)
+	r.tick()
+	raw, _ := os.ReadFile(filepath.Join(r.eng.Config.Dir(), "decisions", "3", "briefing.json"))
+	if !strings.Contains(string(raw), `"lesson:1"`) {
+		t.Fatalf("the briefing must carry the lesson:\n%s", raw)
+	}
+	var btc OpenCall
+	for _, oc := range r.eng.st.Open {
+		if oc.Decision == 3 && oc.Symbol == "BTCUSDT" {
+			btc = oc
+		}
+	}
+	if !slices.Equal(btc.Lessons, []string{"lesson:1"}) || r.eng.mem.Lessons[0].Cited != 1 {
+		t.Fatalf("the call must record the lesson it relied on: %+v, lesson %+v", btc, r.eng.mem.Lessons[0])
+	}
+	// That call turns out wrong, and the lesson is marked down with it.
+	r.advance(10 * time.Hour)
+	r.ex.SetPrice("BTCUSDT", btc.Entry.Float()*0.97)
+	r.advance(15 * time.Hour)
+	r.tick()
+	if l := r.eng.mem.Lessons[0]; l.Right != 0 || l.Wrong != 1 {
+		t.Fatalf("lesson grading: %+v", l)
+	}
+	types, _ := auditTypes(t, r.eng.Config)
+	if !slices.Contains(types, evLessonRecorded) {
+		t.Fatalf("lessons are on record: %v", types)
+	}
+	// Memory survives a restart.
+	r.eng = newEngine(t, r.eng.Config, r)
+	r.open()
+	if len(r.eng.mem.Lessons) == 0 || r.eng.mem.Lessons[0].Wrong != 1 {
+		t.Fatalf("memory after restart: %+v", r.eng.mem.Lessons)
+	}
+}
+
+func TestAFailedReviewRetriesThenGivesUp(t *testing.T) {
+	r := newRig(t, func(req string) (int, any) {
+		if testkit.IsReview(req) {
+			return 500, map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": "boom"}}
+		}
+		return rate("strong_buy", "hold")(req)
+	})
+	r.tick()
+	r.advance(25 * time.Hour)
+	r.tick()
+	if len(r.eng.st.Reviews) != 1 || r.eng.st.ReviewTries != 1 || r.eng.st.ReviewAt.IsZero() {
+		t.Fatalf("a failed review waits for a retry: queue %v, tries %d", r.eng.st.Reviews, r.eng.st.ReviewTries)
+	}
+	calls := r.api.Count()
+	r.advance(10 * time.Minute)
+	r.tick()
+	if r.api.Count() != calls {
+		t.Fatal("no retry before the wait is over")
+	}
+	for i := 0; i < 2; i++ {
+		r.advance(31 * time.Minute)
+		r.tick()
+	}
+	if len(r.eng.st.Reviews) != 0 || r.eng.st.ReviewTries != 0 || !r.sent("Gave up reviewing decision #1") {
+		t.Fatalf("after three failures the review is dropped: queue %v, %q", r.eng.st.Reviews, r.notices())
+	}
+	if len(r.eng.st.Decisions) != 2 || len(r.eng.mem.Lessons) != 0 {
+		t.Fatalf("decisions keep running meanwhile: %d decisions, %d lessons", len(r.eng.st.Decisions), len(r.eng.mem.Lessons))
+	}
+}
+
+func TestHoldsAreReviewedOnlyWhenTheyMissedAMove(t *testing.T) {
+	r := newRig(t, reviewing("hold", "hold", "Weekend ranges resolve on Monday; a flat Sunday is not a signal."))
+	r.tick()
+	r.advance(25 * time.Hour)
+	r.tick()
+	if len(r.eng.st.Scored) != 2 || len(r.eng.mem.Lessons) != 0 || len(r.eng.st.Reviews) != 0 {
+		t.Fatalf("holds through a quiet day teach nothing: %+v, lessons %d", r.eng.st.Scored, len(r.eng.mem.Lessons))
+	}
+	entry := r.eng.st.Open[0].Entry
+	r.advance(10 * time.Hour)
+	r.ex.SetPrice("BTCUSDT", entry.Float()*1.05)
+	r.advance(15 * time.Hour)
+	r.tick()
+	if len(r.eng.mem.Lessons) != 1 || !r.sent("BTC HOLD ✗ +5.0%") {
+		t.Fatalf("a hold through a 5%% move is reviewed: lessons %+v, %q", r.eng.mem.Lessons, r.notices())
 	}
 }

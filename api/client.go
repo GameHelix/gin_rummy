@@ -189,6 +189,16 @@ func (c *Client) Events(ctx context.Context, tenant, agent string, after int64, 
 	return out.Events, c.do(ctx, http.MethodGet, tenantPath(tenant, "agents", agent, "events")+"?"+q.Encode(), nil, &out)
 }
 
+// EventsOfType is Events limited to the given event types.
+func (c *Client) EventsOfType(ctx context.Context, tenant, agent string, types []string, after int64, limit int) ([]Event, error) {
+	q := url.Values{"after": {strconv.FormatInt(after, 10)}, "limit": {strconv.Itoa(limit)}}
+	if len(types) > 0 {
+		q.Set("type", strings.Join(types, ","))
+	}
+	var out EventList
+	return out.Events, c.do(ctx, http.MethodGet, tenantPath(tenant, "agents", agent, "events")+"?"+q.Encode(), nil, &out)
+}
+
 // Stream calls fn with each of the agent's events after seq as it is
 // stored, until ctx ends, fn fails or the connection drops. To carry on
 // after a drop, call it again with the last seq seen.

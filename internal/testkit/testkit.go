@@ -455,60 +455,6 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// Telegram is a fake bot API for one chat.
-type Telegram struct {
-	mu      sync.Mutex
-	ChatID  int64
-	Now     func() time.Time
-	sent    []string
-	updates []map[string]any
-}
-
-func (f *Telegram) Server(t *testing.T) *httptest.Server {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		q, _ := url.ParseQuery(string(body))
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
-			f.sent = append(f.sent, q.Get("text"))
-			writeJSON(w, map[string]any{"ok": true, "result": map[string]any{}})
-		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
-			offset, _ := strconv.ParseInt(q.Get("offset"), 10, 64)
-			var out []map[string]any
-			for _, u := range f.updates {
-				if u["update_id"].(int64) >= offset {
-					out = append(out, u)
-				}
-			}
-			if len(out) == 0 {
-				f.mu.Unlock()
-				time.Sleep(20 * time.Millisecond)
-				f.mu.Lock()
-			}
-			writeJSON(w, map[string]any{"ok": true, "result": out})
-		default:
-			writeJSON(w, map[string]any{"ok": false, "description": "Not Found"})
-		}
-	}))
-	t.Cleanup(s.Close)
-	return s
-}
-
-// Command queues a message from the chat.
-func (f *Telegram) Command(text string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.updates = append(f.updates, map[string]any{"update_id": int64(len(f.updates) + 1), "message": map[string]any{"chat": map[string]any{"id": f.ChatID}, "from": map[string]any{"id": f.ChatID}, "text": text, "date": f.Now().Unix()}})
-}
-
-func (f *Telegram) Sent() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.sent...)
-}
-
 // Headline is one item for NewsServer.
 type Headline struct {
 	Title string
@@ -623,3 +569,17 @@ func SubmitStep(ratings map[string]string, cite func(req string, sym string) []s
 }
 
 func CitePrices(_ string, sym string) []string { return []string{"prices:" + sym} }
+
+// IsReview reports whether a request asks for lessons rather than ratings.
+func IsReview(req string) bool { return strings.Contains(req, `"name":"submit_lessons"`) }
+
+// LessonsStep answers with a submit_lessons call.
+func LessonsStep(lessons ...map[string]any) func(string) (int, any) {
+	return func(string) (int, any) {
+		list := []any{}
+		for _, l := range lessons {
+			list = append(list, l)
+		}
+		return 200, Message("tool_use", Thinking(), ToolUse("toolu_lessons", "submit_lessons", map[string]any{"lessons": list}))
+	}
+}

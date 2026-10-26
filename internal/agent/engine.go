@@ -1,6 +1,6 @@
 // Package agent runs the trading loop: it watches prices and news, asks the
 // analyst for ratings on a schedule or when something happens, trades on
-// Binance within fixed limits, and reports to Telegram.
+// Binance within fixed limits, and reports as notices the notifier delivers.
 package agent
 
 import (
@@ -28,7 +28,6 @@ import (
 	"github.com/candylario/trader/internal/news"
 	"github.com/candylario/trader/internal/num"
 	"github.com/candylario/trader/internal/store"
-	"github.com/candylario/trader/internal/telegram"
 )
 
 type Engine struct {
@@ -36,7 +35,6 @@ type Engine struct {
 	Exchange *binance.Client
 	Analyst  *analyst.Analyst
 	News     news.Source
-	Bot      *telegram.Bot
 	Now      func() time.Time
 	Log      io.Writer
 	// TenantID and AgentID name an agent the fleet manages; a standalone
@@ -60,32 +58,31 @@ type Engine struct {
 	later     []inbound
 	job       *job
 	results   chan result
+	mem       Memory
+	memSaved  []byte
+	reviewing *review
+	reviews   chan reviewResult
 	keyOK     bool
 	keyAt     time.Time
 	sellFails map[string]int
 	logMu     sync.Mutex
 }
 
-// inbound is a user command, from Telegram or the engine API.
+// inbound is a user command, from the engine API.
 type inbound struct {
 	name     string
-	source   string
 	sent     time.Time
 	received time.Time
-	offset   int64      // Telegram's next update offset
-	via      string     // for engine API commands: the app or the notifier's chat
-	reply    chan Reply // where an engine API caller waits
+	via      string     // where the user sent it: the app or the notifier's chat
+	reply    chan Reply // where the caller waits
 }
 
-const (
-	sourceTelegram = "telegram"
-	sourceAPI      = "api"
-)
+const sourceAPI = "api"
 
 // Reply answers a user command.
 type Reply struct {
 	OK     bool    // the command took effect
-	Text   string  // the answer, as Telegram shows it
+	Text   string  // the answer, as a chat shows it
 	Report *Report // for status
 }
 
@@ -102,19 +99,18 @@ func (e *Engine) mailbox() chan inbound {
 	return e.inbox
 }
 
-// Command runs a command from the engine API in the agent's loop, as a
-// Telegram command runs, and returns the answer. A command that takes
-// effect is also announced as a notice. Names are those of the Telegram
-// commands: decide, stop, resume and sellall. Via says where the user sent
-// it: the app or telegram.
+// Command runs a command from the engine API in the agent's loop and
+// returns the answer. A command that takes effect is also announced as a
+// notice. Names are those of the chat commands: decide, stop, resume and
+// sellall. Via says where the user sent it: the app or telegram.
 func (e *Engine) Command(ctx context.Context, name, via string) (Reply, error) {
-	return e.ask(ctx, inbound{name: name, source: sourceAPI, via: via, sent: e.now(), received: e.now()})
+	return e.ask(ctx, inbound{name: name, via: via, sent: e.now(), received: e.now()})
 }
 
 // Status reports the account as the running loop sees it, without
 // recording or announcing anything.
 func (e *Engine) Status(ctx context.Context) (Report, error) {
-	r, err := e.ask(ctx, inbound{name: "status", source: sourceAPI, sent: e.now(), received: e.now()})
+	r, err := e.ask(ctx, inbound{name: "status", sent: e.now(), received: e.now()})
 	if err != nil {
 		return Report{}, err
 	}
@@ -167,9 +163,8 @@ func (e *Engine) logf(format string, args ...any) {
 }
 
 // notify tells the user something. It is recorded as a notice, which the
-// notifier delivers, and sent to the agent's own Telegram bot if it has
-// one. On testnet every message starts with 🧪 so it is never mistaken for
-// a real trade.
+// notifier delivers to their chats. On testnet every message starts with 🧪
+// so it is never mistaken for a real trade.
 func (e *Engine) notify(ctx context.Context, text string) { e.say(ctx, text, "") }
 
 func (e *Engine) say(ctx context.Context, text, alert string) {
@@ -178,14 +173,6 @@ func (e *Engine) say(ctx context.Context, text, alert string) {
 	}
 	e.logf("%s", strings.ReplaceAll(text, "\n", " | "))
 	e.emit(evNotice, notice{Text: text, Alert: alert})
-	if e.Bot == nil {
-		return
-	}
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-	defer cancel()
-	if err := e.Bot.Send(sctx, text); err != nil {
-		e.logf("telegram: %v", err)
-	}
 }
 
 // alert is notify at most once per half hour for each kind of problem.
@@ -201,8 +188,12 @@ func (e *Engine) alert(ctx context.Context, kind, text string) {
 	e.say(ctx, text, kind)
 }
 
-// save writes the state when it has changed since the last write.
+// save writes the state, and the memory, when they have changed since the
+// last write.
 func (e *Engine) save() error {
+	if err := e.saveMemory(); err != nil {
+		return err
+	}
 	raw, err := json.MarshalIndent(e.st, "", "  ")
 	if err != nil {
 		return err
@@ -430,12 +421,19 @@ func (e *Engine) open(ctx context.Context) error {
 		return err
 	}
 	e.st, e.saved = st, nil
+	if e.mem, err = loadMemory(e.Config); err != nil {
+		return err
+	}
+	e.memSaved = nil
 	if err := e.openEvents(); err != nil {
 		return fmt.Errorf("audit log: %w", err)
 	}
 	e.mailbox()
 	if e.results == nil {
 		e.results = make(chan result, 1)
+	}
+	if e.reviews == nil {
+		e.reviews = make(chan reviewResult, 1)
 	}
 	if err := e.connect(ctx); err != nil {
 		return err
@@ -467,9 +465,6 @@ func (e *Engine) Run(ctx context.Context) error {
 	if err := e.open(ctx); err != nil {
 		return err
 	}
-	if e.Bot != nil {
-		go e.poll(ctx, e.st.TelegramOffset)
-	}
 	e.notify(ctx, e.startText())
 	timer := time.NewTimer(0)
 	defer timer.Stop()
@@ -483,6 +478,8 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.handle(ctx, in)
 		case r := <-e.results:
 			e.finish(ctx, r)
+		case r := <-e.reviews:
+			e.finishReview(ctx, r)
 		case <-timer.C:
 			e.tick(ctx)
 			timer.Reset(time.Duration(e.Config.PollSeconds) * time.Second)
@@ -540,36 +537,15 @@ func (e *Engine) Preview(ctx context.Context) (analyst.Briefing, error) {
 		return analyst.Briefing{}, err
 	}
 	e.st = st
+	if e.mem, err = loadMemory(e.Config); err != nil {
+		return analyst.Briefing{}, err
+	}
 	if err := e.watch(ctx); err != nil {
 		return analyst.Briefing{}, err
 	}
 	e.readNews(ctx, e.now())
 	in, err := e.snapshot(ctx, e.st.NextID, "preview", e.now(), "")
 	return in.Briefing, err
-}
-
-func (e *Engine) poll(ctx context.Context, offset int64) {
-	for ctx.Err() == nil {
-		cmds, next, err := e.Bot.Poll(ctx, offset, 50*time.Second)
-		if err != nil {
-			if ctx.Err() == nil {
-				e.logf("telegram: %v", err)
-				select {
-				case <-ctx.Done():
-				case <-time.After(5 * time.Second):
-				}
-			}
-			continue
-		}
-		offset = next
-		for _, c := range cmds {
-			select {
-			case e.inbox <- inbound{name: c.Name, source: sourceTelegram, sent: c.Sent, received: e.now(), offset: next}:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}
 }
 
 const (
@@ -628,29 +604,29 @@ const helpText = `Commands:
 /sellall – sell everything and stop`
 
 func (e *Engine) handle(ctx context.Context, in inbound) {
-	if in.source == sourceAPI && in.name == "status" {
-		// A read for the engine API: answered, not recorded or announced.
+	if in.name == "status" {
+		// A read: answered, not recorded or announced.
+		reply := Reply{}
 		if r, err := e.report(ctx); err != nil {
-			in.reply <- Reply{Text: "Status unavailable: " + err.Error()}
+			reply.Text = "Status unavailable: " + err.Error()
 		} else {
-			in.reply <- Reply{OK: true, Text: r.Text(), Report: &r}
+			reply = Reply{OK: true, Text: r.Text(), Report: &r}
+		}
+		if in.reply != nil {
+			in.reply <- reply
 		}
 		return
 	}
 	defer e.saveOrAlert(ctx)
-	if in.source == sourceTelegram {
-		e.st.TelegramOffset = max(e.st.TelegramOffset, in.offset)
-	}
-	e.emit(evCommand, commandReceived{Name: in.name, Source: in.source, Via: in.via, Sent: in.sent, Received: in.received, Ignored: stale(in)})
-	// answer replies in the chat a Telegram command came from. An engine API
-	// command is answered to its caller, and on Telegram too when it took
-	// effect, so the chat hears of every stop and resume.
+	e.emit(evCommand, commandReceived{Name: in.name, Source: sourceAPI, Via: in.via, Sent: in.sent, Received: in.received, Ignored: stale(in)})
+	// answer replies to the caller and, when the command took effect,
+	// announces it as a notice, so every chat hears of each stop and resume.
 	answer := func(ok bool, text string) {
 		if in.reply != nil {
 			in.reply <- Reply{OK: ok, Text: text}
 			in.reply = nil
 		}
-		if in.source == sourceTelegram || ok {
+		if ok {
 			e.notify(ctx, text)
 		}
 	}
@@ -659,8 +635,6 @@ func (e *Engine) handle(ctx context.Context, in inbound) {
 		return
 	}
 	switch in.name {
-	case "status":
-		answer(true, e.statusText(ctx))
 	case "stop":
 		if e.st.Halted != stopReason {
 			e.emit(evHalted, halted{haltManual, stopReason})
@@ -688,9 +662,9 @@ func (e *Engine) handle(ctx context.Context, in inbound) {
 		case e.st.Halted != "" || e.st.Liquidate:
 			answer(false, "🛑 Trading is stopped ("+e.st.Halted+"). Send /resume first.")
 		default:
-			trigger := "you asked with /decide"
-			if in.source == sourceAPI {
-				trigger = "you asked in the app"
+			trigger := "you asked in the app"
+			if in.via == "telegram" {
+				trigger = "you asked with /decide"
 			}
 			if err := e.startDecision(ctx, kindManual, trigger); err != nil {
 				answer(false, "⚠️ Decision failed: "+untrusted(err.Error()))

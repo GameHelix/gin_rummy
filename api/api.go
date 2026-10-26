@@ -69,13 +69,12 @@ type Key struct {
 const (
 	KindAnthropic = "anthropic"
 	KindBinance   = "binance"
-	KindTelegram  = "telegram"
 )
 
 // NewKey stores a key in the engine's vault after trying it. Secret is
-// {"key"} for Anthropic, {"key", "secret"} for Binance and {"token",
-// "chat_id"} for Telegram. Mode says where a Binance key trades: testnet or
-// live. With an ID, a retried request returns the key stored the first time.
+// {"key"} for Anthropic and {"key", "secret"} for Binance. Mode says where a
+// Binance key trades: testnet or live. With an ID, a retried request returns
+// the key stored the first time.
 type NewKey struct {
 	ID     string          `json:"id,omitempty"`
 	Kind   string          `json:"kind"`
@@ -125,7 +124,7 @@ type Config struct {
 	Config  json.RawMessage `json:"config"`
 }
 
-// Commands an agent takes, as it does on Telegram.
+// Commands an agent takes, as it does from a chat.
 const (
 	Decide        = "decide"
 	StopTrading   = "stop_trading"

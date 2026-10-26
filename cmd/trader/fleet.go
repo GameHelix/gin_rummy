@@ -292,8 +292,8 @@ func openFleet(ctx context.Context, defaults config.Config, e env) (*fleet.Servi
 }
 
 // checkKey tries a key as it is added: a model key must reach the engine's
-// model, an exchange key must read its account where it trades and, live,
-// must not withdraw, and a Telegram bot says hello in its chat.
+// model, and an exchange key must read its account where it trades and,
+// live, must not withdraw.
 func checkKey(e env, model string) func(context.Context, string, string, fleet.Keys) error {
 	return func(ctx context.Context, kind, mode string, k fleet.Keys) error {
 		switch kind {
@@ -323,10 +323,6 @@ func checkKey(e env, model string) func(context.Context, string, string, fleet.K
 					err = errors.New("this Binance key can withdraw funds; create one with withdrawals disabled")
 				}
 				return err
-			}
-		case fleet.KindTelegram:
-			if err := bot(k, e).Send(ctx, "✅ Connected. Your trading agents report here."); err != nil {
-				return fmt.Errorf("the Telegram bot cannot message chat %d: %w", k.TelegramChat, err)
 			}
 		}
 		return nil
@@ -385,11 +381,7 @@ func serve(ctx context.Context, svc *fleet.Service, e env, out io.Writer) error 
 	sup := &fleet.Supervisor{
 		Service: svc, Every: 30 * time.Second, Logf: logf,
 		Build: func(spec fleet.Spec) (*agent.Engine, error) {
-			eng := buildEngine(spec.Config, spec.Keys, e, pool.source(spec.Config.NewsFeeds), fleet.Prefixed(out, "["+spec.Name+"] "))
-			if eng.Bot != nil && eng.Bot.ChatID == 0 {
-				eng.Bot = nil
-			}
-			return eng, nil
+			return buildEngine(spec.Config, spec.Keys, e, pool.source(spec.Config.NewsFeeds), fleet.Prefixed(out, "["+spec.Name+"] ")), nil
 		},
 		Ship: func(ctx context.Context, spec fleet.Spec) {
 			who := pg.Agent{Tenant: spec.Tenant, ID: spec.Agent, Name: spec.Name, Mode: spec.Config.Mode}
@@ -460,9 +452,6 @@ func importStandalone(ctx context.Context, c config.Config, raw []byte, svc *fle
 	secrets := map[string]any{
 		fleet.KindAnthropic: map[string]string{"key": k.Anthropic},
 		fleet.KindBinance:   map[string]string{"key": k.BinanceKey, "secret": k.BinanceSecret},
-	}
-	if k.TelegramToken != "" && k.TelegramChat != 0 {
-		secrets[fleet.KindTelegram] = map[string]any{"token": k.TelegramToken, "chat_id": k.TelegramChat}
 	}
 	en := fleet.Entitlements{Symbols: c.Symbols, MaxAgents: 10, MinDecisionIntervalHours: c.DecisionIntervalHours, MaxEventDecisionsPerDay: c.MaxEventDecisionsPerDay, Live: true}
 	if err := svc.Adopt(ctx, tenant, id, c.Name, c.Mode, en, raw); err != nil {

@@ -26,8 +26,7 @@ func found(err error) error {
 // ErrExists means the ID or a unique name is already taken.
 var ErrExists = errors.New("already exists")
 
-// ErrKeyInUse means an exchange key or Telegram bot already serves another
-// agent.
+// ErrKeyInUse means an exchange key already serves another agent.
 var ErrKeyInUse = errors.New("that key is used by another agent")
 
 func unique(err error) error {

@@ -85,13 +85,15 @@ type Decision struct {
 	Abstained bool                      `json:"abstained,omitempty"`
 }
 
-// OpenCall is a buy or sell rating waiting to be graded at Due.
+// OpenCall is a rating waiting to be graded at Due, with the lessons it
+// relied on, which are graded with it.
 type OpenCall struct {
 	Decision int            `json:"decision"`
 	Symbol   string         `json:"symbol"`
 	Rating   analyst.Rating `json:"rating"`
 	Entry    num.Dec        `json:"entry_price"`
 	Due      time.Time      `json:"due"`
+	Lessons  []string       `json:"lessons,omitempty"`
 }
 
 type ScoredCall struct {
@@ -103,38 +105,43 @@ type ScoredCall struct {
 
 // State is the account's single source of truth, rewritten atomically.
 type State struct {
-	Version        string       `json:"schema_version"`
-	TenantID       string       `json:"tenant_id"`
-	AgentID        string       `json:"agent_id"`
-	Mode           string       `json:"mode"`
-	Name           string       `json:"name"`
-	Symbols        []string     `json:"symbols"`
-	CreatedAt      time.Time    `json:"created_at"`
-	Nonce          string       `json:"order_nonce"`
-	OrderSeq       int          `json:"order_seq"`
-	Capital        num.Dec      `json:"capital"`
-	RiskBase       num.Dec      `json:"drawdown_base"`
-	TakerFee       num.Dec      `json:"taker_fee"`
-	Ledger         Ledger       `json:"ledger"`
-	Benchmark      Ledger       `json:"buy_and_hold"`
-	Halted         string       `json:"halted,omitempty"`
-	HaltKind       string       `json:"halt_kind,omitempty"`
-	Liquidate      bool         `json:"selling_everything,omitempty"`
-	DrawdownHit    bool         `json:"drawdown_hit,omitempty"`
-	Day            string       `json:"day"`
-	DayEquity      num.Dec      `json:"day_start_equity"`
-	NextID         int          `json:"next_decision_id"`
-	Decisions      []Decision   `json:"decisions"`
-	Pending        []Pending    `json:"pending_orders"`
-	Trades         []Trade      `json:"trades"`
-	History        []Point      `json:"history"`
-	Open           []OpenCall   `json:"open_calls"`
-	Scored         []ScoredCall `json:"scored_calls"`
-	SeenNews       []string     `json:"seen_news"`
-	NewsPrimed     bool         `json:"news_primed"`
-	NewsQueue      []news.Item  `json:"news_queue,omitempty"`
-	RetryAt        time.Time    `json:"retry_at,omitzero"`
-	TelegramOffset int64        `json:"telegram_offset"`
+	Version     string       `json:"schema_version"`
+	TenantID    string       `json:"tenant_id"`
+	AgentID     string       `json:"agent_id"`
+	Mode        string       `json:"mode"`
+	Name        string       `json:"name"`
+	Symbols     []string     `json:"symbols"`
+	CreatedAt   time.Time    `json:"created_at"`
+	Nonce       string       `json:"order_nonce"`
+	OrderSeq    int          `json:"order_seq"`
+	Capital     num.Dec      `json:"capital"`
+	RiskBase    num.Dec      `json:"drawdown_base"`
+	TakerFee    num.Dec      `json:"taker_fee"`
+	Ledger      Ledger       `json:"ledger"`
+	Benchmark   Ledger       `json:"buy_and_hold"`
+	Halted      string       `json:"halted,omitempty"`
+	HaltKind    string       `json:"halt_kind,omitempty"`
+	Liquidate   bool         `json:"selling_everything,omitempty"`
+	DrawdownHit bool         `json:"drawdown_hit,omitempty"`
+	Day         string       `json:"day"`
+	DayEquity   num.Dec      `json:"day_start_equity"`
+	NextID      int          `json:"next_decision_id"`
+	Decisions   []Decision   `json:"decisions"`
+	Pending     []Pending    `json:"pending_orders"`
+	Trades      []Trade      `json:"trades"`
+	History     []Point      `json:"history"`
+	Open        []OpenCall   `json:"open_calls"`
+	Scored      []ScoredCall `json:"scored_calls"`
+	SeenNews    []string     `json:"seen_news"`
+	NewsPrimed  bool         `json:"news_primed"`
+	NewsQueue   []news.Item  `json:"news_queue,omitempty"`
+	RetryAt     time.Time    `json:"retry_at,omitzero"`
+	Reviews     []int        `json:"review_queue,omitempty"`
+	ReviewAt    time.Time    `json:"review_retry_at,omitzero"`
+	ReviewTries int          `json:"review_tries,omitempty"`
+	// TelegramOffset is from the agent's own bot, since removed; it stays so
+	// older state files still load, and is dropped on the next save.
+	TelegramOffset int64 `json:"telegram_offset,omitempty"`
 }
 
 const (
@@ -185,6 +192,7 @@ func LoadState(c config.Config) (State, error) {
 	if st.Nonce == "" {
 		return st, fmt.Errorf("%s: missing order nonce", StatePath(c))
 	}
+	st.TelegramOffset = 0
 	return st, nil
 }
 

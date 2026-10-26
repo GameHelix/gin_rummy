@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,12 +29,11 @@ import (
 	"github.com/candylario/trader/internal/news"
 	"github.com/candylario/trader/internal/num"
 	"github.com/candylario/trader/internal/pg"
-	"github.com/candylario/trader/internal/telegram"
 )
 
 const usage = `trader — AI crypto trading agent for Binance spot
 
-  trader check            check keys, permissions, balances, news and Telegram
+  trader check            check keys, permissions, balances and news
   trader init             start the account with capital_usd from the config
   trader run              trade around the clock on its own, with keys from .env
   trader decide           make one decision now
@@ -51,7 +49,7 @@ Multi-user engine (needs DATABASE_URL and ENGINE_MASTER_KEY):
   trader import           move this standalone agent into the database
   trader tenant add --name NAME --plan FILE
   trader tenant plan --tenant ID --plan FILE
-  trader key add --tenant ID --kind anthropic|binance|telegram [--mode testnet|live] [--label TEXT] < key.json
+  trader key add --tenant ID --kind anthropic|binance [--mode testnet|live] [--label TEXT] < key.json
   trader key list --tenant ID
   trader key revoke --tenant ID --key ID
   trader agent add --tenant ID --name NAME --mode testnet|live --config FILE --keys ID,ID
@@ -72,12 +70,11 @@ func main() {
 
 // env holds what tests replace: endpoints, the clock and standard input.
 type env struct {
-	HTTP        *http.Client
-	BinanceURL  string
-	APIURL      string
-	TelegramURL string
-	Now         func() time.Time
-	In          io.Reader
+	HTTP       *http.Client
+	BinanceURL string
+	APIURL     string
+	Now        func() time.Time
+	In         io.Reader
 }
 
 func run(ctx context.Context, args []string, out io.Writer, e env) error {
@@ -151,10 +148,6 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 		return err
 	}
 	budget := eng.Analyst.Budget
-	if eng.Bot != nil && eng.Bot.ChatID == 0 && cmd != "check" {
-		fmt.Fprintln(out, "Telegram is off: TELEGRAM_CHAT_ID is not set (run `trader check` to find it).")
-		eng.Bot = nil
-	}
 	switch cmd {
 	case "check":
 		return check(ctx, out, c, eng)
@@ -234,21 +227,12 @@ func build(c config.Config, e env, log io.Writer) (*agent.Engine, error) {
 
 // keysFromEnv reads the standalone agent's keys from the environment.
 func keysFromEnv() (fleet.Keys, error) {
-	k := fleet.Keys{Anthropic: apiKey(), BinanceKey: os.Getenv("BINANCE_API_KEY"), BinanceSecret: os.Getenv("BINANCE_API_SECRET"), TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN")}
-	if id := os.Getenv("TELEGRAM_CHAT_ID"); id != "" {
-		chat, err := strconv.ParseInt(id, 10, 64)
-		if err != nil {
-			return k, errors.New("TELEGRAM_CHAT_ID must be a number")
-		}
-		k.TelegramChat = chat
-	}
-	return k, nil
+	return fleet.Keys{Anthropic: apiKey(), BinanceKey: os.Getenv("BINANCE_API_KEY"), BinanceSecret: os.Getenv("BINANCE_API_SECRET")}, nil
 }
 
-// buildEngine wires an agent to Binance, the model and Telegram with the
-// given keys.
+// buildEngine wires an agent to Binance and the model with the given keys.
 func buildEngine(c config.Config, k fleet.Keys, e env, src news.Source, log io.Writer) *agent.Engine {
-	eng := &agent.Engine{
+	return &agent.Engine{
 		Config:   c,
 		Exchange: exchange(c.Mode, k, e),
 		// One budget for testnet and live: both spend the same model key.
@@ -258,10 +242,6 @@ func buildEngine(c config.Config, k fleet.Keys, e env, src news.Source, log io.W
 		Now:  e.Now,
 		Log:  log,
 	}
-	if k.TelegramToken != "" {
-		eng.Bot = bot(k, e)
-	}
-	return eng
 }
 
 func exchange(mode string, k fleet.Keys, e env) *binance.Client {
@@ -281,10 +261,6 @@ func modelClient(key string, e env) anthropic.Client {
 		opts = append(opts, option.WithBaseURL(e.APIURL))
 	}
 	return anthropic.NewClient(opts...)
-}
-
-func bot(k fleet.Keys, e env) *telegram.Bot {
-	return &telegram.Bot{HTTP: &http.Client{Timeout: 90 * time.Second}, BaseURL: e.TelegramURL, Token: k.TelegramToken, ChatID: k.TelegramChat}
 }
 
 // exchangeClient never follows redirects, so the API key header cannot be
@@ -388,22 +364,6 @@ func check(ctx context.Context, out io.Writer, c config.Config, eng *agent.Engin
 	}
 	items, err := eng.News.Fetch(ctx, eng.Now(), 72*time.Hour, nil)
 	report(err, fmt.Sprintf("%d headlines from %d feeds", len(items), len(c.NewsFeeds)))
-	switch bot := eng.Bot; {
-	case bot == nil:
-		fmt.Fprintln(out, "--   Telegram off (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID for alerts)")
-	case bot.ChatID == 0:
-		chats, err := bot.Chats(ctx)
-		if err == nil && len(chats) == 0 {
-			err = errors.New("send any message to your bot, then run check again to see your chat ID")
-		}
-		for id, name := range chats {
-			fmt.Fprintf(out, "--   chat %d (%s): put TELEGRAM_CHAT_ID=%d in .env\n", id, news.CleanText(name, 60), id)
-		}
-		report(err, "Telegram bot found")
-		failed = true
-	default:
-		report(bot.Send(ctx, "trader check: alerts will arrive here."), "Telegram message sent")
-	}
 	if failed {
 		return errors.New("some checks failed")
 	}

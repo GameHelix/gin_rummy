@@ -213,12 +213,12 @@ func (s *Store) hasMonth(at time.Time) bool {
 const eventsChannel = "agent_events"
 
 // Events returns up to limit of the agent's stored events after seq, in
-// order.
-func (s *Store) Events(ctx context.Context, tenant, agent uuid.UUID, after int64, limit int) ([]audit.Event, error) {
+// order: all of them, or only those of the given types.
+func (s *Store) Events(ctx context.Context, tenant, agent uuid.UUID, after int64, limit int, types []string) ([]audit.Event, error) {
 	var out []audit.Event
 	err := s.inTenant(ctx, tenant, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `select id, seq, type, at, body::text, prev_hash, hash from events
-			where agent_id = $1 and seq > $2 order by seq limit $3`, agent, after, limit)
+			where agent_id = $1 and seq > $2 and ($4::text[] is null or type = any($4)) order by seq limit $3`, agent, after, limit, types)
 		if err != nil {
 			return err
 		}

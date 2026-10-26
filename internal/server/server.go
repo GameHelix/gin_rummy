@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -581,8 +582,8 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) (int, any, error
 	return http.StatusOK, statusOut(row, running, rep), nil
 }
 
-// commands maps the API's command names to the agent's, which are
-// Telegram's.
+// commands maps the API's command names to the agent's, which are the
+// chat's.
 var commands = map[string]string{api.Decide: "decide", api.StopTrading: "stop", api.ResumeTrading: "resume", api.SellAll: "sellall"}
 
 func (s *Server) command(w http.ResponseWriter, r *http.Request) (int, any, error) {
@@ -655,15 +656,40 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) (int, any, error
 			return 0, nil, badRequest("limit must be between 1 and 1000")
 		}
 	}
+	types, err := eventTypes(r.URL.Query().Get("type"))
+	if err != nil {
+		return 0, nil, err
+	}
 	if _, err := s.Fleet.Store.Agent(r.Context(), ids[0], ids[1]); err != nil {
 		return 0, nil, err
 	}
-	events, err := s.Fleet.Store.Events(r.Context(), ids[0], ids[1], from, limit)
+	events, err := s.Fleet.Store.Events(r.Context(), ids[0], ids[1], from, limit, types)
 	out := api.EventList{Events: []api.Event{}}
 	for _, e := range events {
 		out.Events = append(out.Events, eventOut(e))
 	}
 	return http.StatusOK, out, err
+}
+
+var eventTypePattern = regexp.MustCompile(`^[a-z]+(\.[a-z_]+)?$`)
+
+// eventTypes reads the type filter: event types, comma-separated.
+func eventTypes(v string) ([]string, error) {
+	if v == "" {
+		return nil, nil
+	}
+	var out []string
+	for _, t := range strings.Split(v, ",") {
+		t = strings.TrimSpace(t)
+		if !eventTypePattern.MatchString(t) {
+			return nil, badRequest("type must list event types, comma-separated")
+		}
+		out = append(out, t)
+	}
+	if len(out) > 20 {
+		return nil, badRequest("type lists at most 20 event types")
+	}
+	return out, nil
 }
 
 // stream sends the agent's events as server-sent events: what is stored
@@ -694,7 +720,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	rc.Flush()
 	const page = 500
 	for {
-		events, err := s.Fleet.Store.Events(r.Context(), ids[0], ids[1], seq, page)
+		events, err := s.Fleet.Store.Events(r.Context(), ids[0], ids[1], seq, page, nil)
 		if err != nil {
 			if r.Context().Err() == nil {
 				s.Logf("event stream: %v", err)

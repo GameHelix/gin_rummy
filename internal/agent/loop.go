@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,7 +17,8 @@ import (
 
 // tick is one pass of the loop: settle orders, refresh prices, record
 // equity, enforce loss limits, keep selling if a sell-off is under way,
-// grade old calls, read news, and start a decision if one is due.
+// grade old calls and review them, read news, and start a decision if one
+// is due.
 func (e *Engine) tick(ctx context.Context) {
 	now := e.now()
 	if e.Config.Mode == config.Live && !e.keyOK && now.Sub(e.keyAt) >= 10*time.Minute {
@@ -41,6 +43,7 @@ func (e *Engine) tick(ctx context.Context) {
 		e.sellAll(ctx)
 	}
 	e.score(ctx, now)
+	e.review(ctx, now)
 	e.readNews(ctx, now)
 	if kind, trigger := e.trigger(now); trigger != "" {
 		if err := e.startDecision(ctx, kind, trigger); err != nil {
@@ -148,9 +151,12 @@ func (e *Engine) guard(ctx context.Context) bool {
 	return e.st.Halted == "" && !e.st.Liquidate && (e.Config.Mode != config.Live || e.keyOK)
 }
 
-// score grades calls whose horizon has passed against the price at Due.
+// score grades calls whose horizon has passed against the price at Due,
+// grades the lessons they relied on with them, and queues a review of each
+// decision whose calls are all graded.
 func (e *Engine) score(ctx context.Context, now time.Time) {
 	var open []OpenCall
+	var done []int
 	for _, oc := range e.st.Open {
 		if now.Before(oc.Due) {
 			open = append(open, oc)
@@ -167,11 +173,21 @@ func (e *Engine) score(ctx context.Context, now time.Time) {
 		}
 		ret := exit.Float()/oc.Entry.Float() - 1
 		score, _ := oc.Rating.Score()
-		graded := ScoredCall{OpenCall: oc, Exit: exit, Return: round(ret, 5), Hit: (score > 0 && ret > 0) || (score < 0 && ret < 0)}
+		graded := ScoredCall{OpenCall: oc, Exit: exit, Return: round(ret, 5), Hit: hit(score, ret)}
 		e.st.Scored = keep(append(e.st.Scored, graded), 1000)
+		e.mem.grade(oc.Lessons, graded.Hit)
 		e.emit(evCallGraded, graded)
+		if !slices.Contains(done, oc.Decision) {
+			done = append(done, oc.Decision)
+		}
 	}
 	e.st.Open = open
+	for _, id := range done {
+		pending := slices.ContainsFunc(open, func(oc OpenCall) bool { return oc.Decision == id })
+		if !pending && e.worthReview(id) && !slices.Contains(e.st.Reviews, id) {
+			e.st.Reviews = append(e.st.Reviews, id)
+		}
+	}
 }
 
 // readNews refreshes headlines every five minutes. New, recent headlines

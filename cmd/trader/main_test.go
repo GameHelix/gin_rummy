@@ -69,7 +69,7 @@ func setup(t *testing.T) (string, env, *int) {
 	calls := 0
 	e := env{HTTP: feed.Client(), BinanceURL: ex.Server(t).URL, APIURL: apiServer(t, &calls).URL, Now: func() time.Time { return now }}
 	for k, v := range map[string]string{"ANTHROPIC_API_KEY": "test-key", "ANTROPIC_API_KEY": "", "BINANCE_API_KEY": testkit.Key, "BINANCE_API_SECRET": testkit.Secret,
-		"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "", "TRADER_MODE": "", "TRADER_MODEL": ""} {
+		"TRADER_MODE": "", "TRADER_MODEL": ""} {
 		t.Setenv(k, v)
 	}
 	return writeConfig(t, feed.URL), e, &calls
@@ -134,25 +134,12 @@ func TestCheckReportsEachDependency(t *testing.T) {
 	if err := run(context.Background(), []string{"check", "--config", cfg}, &out, e); err != nil {
 		t.Fatalf("check: %v\n%s", err, out.String())
 	}
-	for _, want := range []string{"ok   model test-model", "ok   API key reads the account; 1000 USDT free", "ok   API key may place orders", "ok   1 headlines from 1 feeds", "--   Telegram off"} {
+	for _, want := range []string{"ok   model test-model", "ok   API key reads the account; 1000 USDT free", "ok   API key may place orders", "ok   1 headlines from 1 feeds"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("check lacks %q:\n%s", want, out.String())
 		}
 	}
 	if *calls != 0 {
 		t.Fatal("check must not call the model")
-	}
-	tg := &testkit.Telegram{ChatID: 4242, Now: func() time.Time { return now }}
-	tg.Command("hi")
-	e.TelegramURL = tg.Server(t).URL
-	t.Setenv("TELEGRAM_BOT_TOKEN", "T")
-	out.Reset()
-	if err := run(context.Background(), []string{"check", "--config", cfg}, &out, e); err == nil || !strings.Contains(out.String(), "TELEGRAM_CHAT_ID=4242") {
-		t.Fatalf("check must show the chat ID to configure: %v\n%s", err, out.String())
-	}
-	t.Setenv("TELEGRAM_CHAT_ID", "4242")
-	out.Reset()
-	if err := run(context.Background(), []string{"check", "--config", cfg}, &out, e); err != nil || len(tg.Sent()) != 1 {
-		t.Fatalf("check must send a test message: %v\n%s", err, out.String())
 	}
 }
