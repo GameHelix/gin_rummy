@@ -18,7 +18,7 @@ echo "Copying the database..."
 docker compose exec -T postgres pg_dump -U trader -d trader --clean --if-exists | gzip |
   ssh "$host" "cd $dir && gunzip | docker compose exec -T postgres psql -q -v ON_ERROR_STOP=1 -U trader -d trader" >/dev/null
 echo "Copying data/..."
-tar -C data -czf - . | ssh "$host" "cd $dir && sudo tar -xzf - -C data && sudo chown -R 65532:65532 data"
+COPYFILE_DISABLE=1 tar --no-xattrs -C data -czf - . | ssh "$host" "cd $dir && sudo tar -xzf - -C data && sudo chown -R 65532:65532 data"
 ssh "$host" "cd $dir && docker compose up -d --no-build"
 docker compose down
 echo "The engine now runs on $host; nothing runs here. Logs: ssh $host 'cd $dir && docker compose logs -f trader'"
