@@ -41,7 +41,7 @@ Any server prepared by [candylario/infra](https://github.com/candylario/infra), 
 ./deploy.sh deploy@SERVER_IP   # builds for the server's CPU; ships the image, compose.yaml, config/ and .env over SSH
 ```
 
-Data and the database stay on the server. Allow the server's IP on the Binance key.
+Data and the database stay on the server. Allow the server's IP on the Binance key. `./move.sh deploy@SERVER_IP` moves an engine running here to the server, database and data included, and stops it here.
 
 ## Engine API
 
