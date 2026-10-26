@@ -64,6 +64,16 @@ paths:
       responses:
         "200": {$ref: "#/components/responses/Tenant"}
         "404": {$ref: "#/components/responses/Error"}
+    delete:
+      summary: Close a tenant for good
+      description: Its agents stop, every key is revoked and its sealed secret erased, and the tenant keeps its id and history but not its name. A closed tenant takes no new keys, agents or plans. Closing twice changes nothing more.
+      responses:
+        "200":
+          description: The agents that stopped
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Closed"}
+        "404": {$ref: "#/components/responses/Error"}
   /v1/tenants/{tenant}/plan:
     parameters:
       - $ref: "#/components/parameters/tenant"
@@ -446,6 +456,13 @@ components:
           type: array
           items: {$ref: "#/components/schemas/Key"}
     Revoked:
+      type: object
+      required: [stopped]
+      properties:
+        stopped:
+          type: array
+          items: {$ref: "#/components/schemas/Stopped"}
+    Closed:
       type: object
       required: [stopped]
       properties:

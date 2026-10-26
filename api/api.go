@@ -92,6 +92,11 @@ type Revoked struct {
 	Stopped []Stopped `json:"stopped"`
 }
 
+// Closed lists the agents that closing an account stopped.
+type Closed struct {
+	Stopped []Stopped `json:"stopped"`
+}
+
 // Agent is a trading agent. Status is what the user asked for, active or
 // stopped; Running is whether the engine runs it right now.
 type Agent struct {

@@ -117,6 +117,13 @@ func (c *Client) RevokeKey(ctx context.Context, tenant, key string) (Revoked, er
 	return out, c.do(ctx, http.MethodDelete, tenantPath(tenant, "keys", key), nil, &out)
 }
 
+// CloseTenant closes an account for good: its agents stop, its keys are
+// erased and its name is gone.
+func (c *Client) CloseTenant(ctx context.Context, tenant string) (Closed, error) {
+	var out Closed
+	return out, c.do(ctx, http.MethodDelete, tenantPath(tenant), nil, &out)
+}
+
 func (c *Client) CreateAgent(ctx context.Context, tenant string, a NewAgent) (Agent, error) {
 	var out Agent
 	return out, c.do(ctx, http.MethodPost, tenantPath(tenant, "agents"), a, &out)

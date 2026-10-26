@@ -47,6 +47,39 @@ type Tenant struct {
 	Entitlements json.RawMessage
 }
 
+// TenantClosed is the status of an account closed for good.
+const TenantClosed = "closed"
+
+// CloseTenant closes an account for good: its agents stop, every key is
+// revoked and loses its hint and sealed secret, and the tenant keeps its id
+// and history but not its name. It returns the agents it stopped.
+func (s *Store) CloseTenant(ctx context.Context, tenant uuid.UUID) ([]uuid.UUID, error) {
+	var agents []uuid.UUID
+	err := s.inTenant(ctx, tenant, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, "update tenants set status = $2, name = '' where id = $1", tenant, TenantClosed)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		if _, err := tx.Exec(ctx, `update credentials set revoked_at = coalesce(revoked_at, now()), hint = '',
+			ciphertext = '', nonce = '', wrapped_key = '', key_nonce = '' where tenant_id = $1`, tenant); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "delete from agent_credentials where tenant_id = $1", tenant); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, "update agents set status = $2 where tenant_id = $1 and status = $3 returning id", tenant, StatusStopped, StatusActive)
+		if err != nil {
+			return err
+		}
+		agents, err = pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+		return err
+	})
+	return agents, err
+}
+
 func (s *Store) CreateTenant(ctx context.Context, t Tenant) error {
 	return s.inTenant(ctx, t.ID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, "insert into tenants (id, name, entitlements) values ($1, $2, $3)", t.ID, t.Name, string(t.Entitlements))

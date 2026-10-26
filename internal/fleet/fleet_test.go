@@ -315,3 +315,55 @@ func TestNewVersionsAndKeysRestartAgentsAndRevokedKeysStopThem(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestClosingATenantStopsItsAgentsAndErasesItsKeys(t *testing.T) {
+	s := service(t)
+	ctx := context.Background()
+	tn, _, _ := s.AddTenant(ctx, uuid.Nil, "alice@example.com", plan)
+	tenant := tn.ID
+	model, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindAnthropic, Label: "main", Secret: []byte(`{"key":"sk-secret"}`)})
+	ex, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: "main", Mode: "testnet", Secret: []byte(`{"key":"kkkkwxyz","secret":"s"}`)})
+	row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: "btc-eth", Mode: "testnet", Config: agentConfig(t, nil), Keys: []uuid.UUID{model.ID, ex.ID}, By: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(ctx, tenant, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	bob, _, _ := s.AddTenant(ctx, uuid.Nil, "bob@example.com", plan)
+
+	stopped, err := s.CloseTenant(ctx, tenant)
+	if err != nil || len(stopped) != 1 || stopped[0] != row.ID {
+		t.Fatalf("closing stops the agent: %v %v", stopped, err)
+	}
+	if run, _ := s.Store.Runnable(ctx); len(run) != 0 {
+		t.Fatalf("nothing of a closed tenant may run: %+v", run)
+	}
+	if tn, _ := s.Store.Tenant(ctx, tenant); tn.Status != pg.TenantClosed || tn.Name != "" {
+		t.Fatalf("the tenant keeps no name: %+v", tn)
+	}
+	for _, id := range []uuid.UUID{model.ID, ex.ID} {
+		if c, err := s.Store.Credential(ctx, tenant, id); err != nil || !c.Revoked || c.Hint != "" || len(c.Sealed.Ciphertext) != 0 || len(c.Sealed.WrappedKey) != 0 {
+			t.Fatalf("key %s is not erased: %+v %v", id, c, err)
+		}
+	}
+	refused := new(Refused)
+	if _, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindAnthropic, Secret: []byte(`{"key":"sk-new"}`)}); !errors.As(err, &refused) {
+		t.Fatalf("a closed tenant takes no keys: %v", err)
+	}
+	if err := s.Start(ctx, tenant, row.ID); !errors.As(err, &refused) {
+		t.Fatalf("a closed tenant's agent cannot start: %v", err)
+	}
+	if _, err := s.SetEntitlements(ctx, tenant, plan); !errors.As(err, &refused) {
+		t.Fatalf("a closed tenant takes no plan: %v", err)
+	}
+	if again, err := s.CloseTenant(ctx, tenant); err != nil || len(again) != 0 {
+		t.Fatalf("closing twice: %v %v", again, err)
+	}
+	if _, err := s.CloseTenant(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, pg.ErrNotFound) {
+		t.Fatalf("an unknown tenant: %v", err)
+	}
+	if b, _ := s.Store.Tenant(ctx, bob.ID); b.Status != "active" || b.Name != "bob@example.com" {
+		t.Fatalf("another tenant changed: %+v", b)
+	}
+}

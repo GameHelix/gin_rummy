@@ -94,6 +94,7 @@ func (s *Server) routes() []route {
 		{pattern: "POST /v1/tenants/{tenant}/keys", json: s.addKey},
 		{pattern: "GET /v1/tenants/{tenant}/keys", json: s.listKeys},
 		{pattern: "DELETE /v1/tenants/{tenant}/keys/{key}", json: s.revokeKey},
+		{pattern: "DELETE /v1/tenants/{tenant}", json: s.closeTenant},
 		{pattern: "POST /v1/tenants/{tenant}/agents", json: s.createAgent},
 		{pattern: "GET /v1/tenants/{tenant}/agents", json: s.listAgents},
 		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}", json: s.getAgent},
@@ -363,6 +364,19 @@ func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) (int, any, er
 	out := api.Revoked{Stopped: []api.Stopped{}}
 	for _, id := range stopped {
 		out.Stopped = append(out.Stopped, api.Stopped{AgentID: id.String(), Reason: "its key was revoked"})
+	}
+	return http.StatusOK, out, err
+}
+
+func (s *Server) closeTenant(w http.ResponseWriter, r *http.Request) (int, any, error) {
+	ids, err := pathIDs(r, "tenant")
+	if err != nil {
+		return 0, nil, err
+	}
+	stopped, err := s.Fleet.CloseTenant(r.Context(), ids[0])
+	out := api.Closed{Stopped: []api.Stopped{}}
+	for _, id := range stopped {
+		out.Stopped = append(out.Stopped, api.Stopped{AgentID: id.String(), Reason: "its account was closed"})
 	}
 	return http.StatusOK, out, err
 }

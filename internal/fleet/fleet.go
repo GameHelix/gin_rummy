@@ -164,6 +164,9 @@ func (s *Service) AddTenant(ctx context.Context, id uuid.UUID, name string, en E
 // not allow stop; when more are active than it allows, the newest stop. It
 // returns why each agent stopped.
 func (s *Service) SetEntitlements(ctx context.Context, tenant uuid.UUID, en Entitlements) (map[uuid.UUID]string, error) {
+	if err := s.open(ctx, tenant); err != nil {
+		return nil, err
+	}
 	if err := en.Validate(); err != nil {
 		return nil, refuse(err)
 	}
@@ -246,6 +249,9 @@ type NewKey struct {
 // seals and stores it. The secret is never logged or returned; only a hint
 // of its last characters is.
 func (s *Service) AddKey(ctx context.Context, tenant uuid.UUID, k NewKey) (pg.Credential, bool, error) {
+	if err := s.open(ctx, tenant); err != nil {
+		return pg.Credential{}, false, err
+	}
 	if k.ID == uuid.Nil {
 		k.ID = uuid.Must(uuid.NewV7())
 	} else if c, err := s.Store.Credential(ctx, tenant, k.ID); !errors.Is(err, pg.ErrNotFound) {
@@ -281,6 +287,25 @@ func (s *Service) AddKey(ctx context.Context, tenant uuid.UUID, k NewKey) (pg.Cr
 
 // RevokeKey revokes a stored key. Agents that used it stop, and are
 // returned. Revoking a revoked key does nothing.
+// CloseTenant closes an account for good: its agents stop, its keys can
+// never be opened again and its name is gone. It returns the agents it
+// stopped; closing twice changes nothing more.
+func (s *Service) CloseTenant(ctx context.Context, tenant uuid.UUID) ([]uuid.UUID, error) {
+	return s.Store.CloseTenant(ctx, tenant)
+}
+
+// open refuses changes to a closed account.
+func (s *Service) open(ctx context.Context, tenant uuid.UUID) error {
+	t, err := s.Store.Tenant(ctx, tenant)
+	if err != nil {
+		return err
+	}
+	if t.Status == pg.TenantClosed {
+		return refusef("this account is closed")
+	}
+	return nil
+}
+
 func (s *Service) RevokeKey(ctx context.Context, tenant, key uuid.UUID) ([]uuid.UUID, error) {
 	c, err := s.Store.Credential(ctx, tenant, key)
 	if err != nil || c.Revoked {
@@ -345,6 +370,9 @@ type NewAgent struct {
 
 // AddAgent creates a stopped agent with its first config and keys.
 func (s *Service) AddAgent(ctx context.Context, tenant uuid.UUID, a NewAgent) (pg.AgentRow, bool, error) {
+	if err := s.open(ctx, tenant); err != nil {
+		return pg.AgentRow{}, false, err
+	}
 	if a.ID == uuid.Nil {
 		a.ID = uuid.Must(uuid.NewV7())
 	} else if row, err := s.Store.Agent(ctx, tenant, a.ID); !errors.Is(err, pg.ErrNotFound) {
@@ -437,6 +465,9 @@ func (s *Service) settings(row pg.AgentRow, raw []byte) (config.Config, error) {
 }
 
 func (s *Service) Start(ctx context.Context, tenant, agent uuid.UUID) error {
+	if err := s.open(ctx, tenant); err != nil {
+		return err
+	}
 	spec, err := s.Spec(ctx, tenant, agent)
 	if err != nil {
 		return err

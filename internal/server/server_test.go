@@ -430,3 +430,30 @@ func schemaFields(lines []string, name string) []string {
 	}
 	return out
 }
+
+func TestClosingATenantThroughTheAPI(t *testing.T) {
+	r := newRig(t)
+	c, ctx := r.client, context.Background()
+	tid := uuid.Must(uuid.NewV7()).String()
+	if _, err := c.CreateTenant(ctx, api.NewTenant{ID: tid, Name: "alice@example.com", Plan: plan}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddKey(ctx, tid, api.NewKey{Kind: api.KindAnthropic, Label: "model", Secret: json.RawMessage(`{"key":"sk-alice"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := c.CloseTenant(ctx, tid); err != nil || out.Stopped == nil {
+		t.Fatalf("close: %+v %v", out, err)
+	}
+	if tn, err := c.Tenant(ctx, tid); err != nil || tn.Status != "closed" || tn.Name != "" {
+		t.Fatalf("closed tenant: %+v %v", tn, err)
+	}
+	if keys, err := c.Keys(ctx, tid); err != nil || len(keys) != 1 || !keys[0].Revoked || keys[0].Hint != "" {
+		t.Fatalf("keys of a closed tenant: %+v %v", keys, err)
+	}
+	if _, err := c.AddKey(ctx, tid, api.NewKey{Kind: api.KindAnthropic, Secret: json.RawMessage(`{"key":"sk-alice"}`)}); code(err) != "refused" {
+		t.Fatalf("a closed tenant takes no keys: %v", err)
+	}
+	if _, err := c.CloseTenant(ctx, uuid.Must(uuid.NewV7()).String()); code(err) != "not_found" {
+		t.Fatalf("an unknown tenant: %v", err)
+	}
+}
