@@ -85,10 +85,11 @@ func (s *Server) listen(ctx context.Context) {
 }
 
 type route struct {
-	pattern string
-	open    bool // answered without the token
-	json    func(w http.ResponseWriter, r *http.Request) (int, any, error)
-	raw     http.HandlerFunc
+	pattern  string
+	open     bool // answered without a token
+	notifier bool // answered to the notifier's token as well
+	json     func(w http.ResponseWriter, r *http.Request) (int, any, error)
+	raw      http.HandlerFunc
 }
 
 func (s *Server) routes() []route {
@@ -103,17 +104,17 @@ func (s *Server) routes() []route {
 		{pattern: "DELETE /v1/tenants/{tenant}/keys/{key}", json: s.revokeKey},
 		{pattern: "DELETE /v1/tenants/{tenant}", json: s.closeTenant},
 		{pattern: "POST /v1/tenants/{tenant}/agents", json: s.createAgent},
-		{pattern: "GET /v1/tenants/{tenant}/agents", json: s.listAgents},
+		{pattern: "GET /v1/tenants/{tenant}/agents", notifier: true, json: s.listAgents},
 		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}", json: s.getAgent},
 		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}/config", json: s.getConfig},
 		{pattern: "PUT /v1/tenants/{tenant}/agents/{agent}/config", json: s.setConfig},
 		{pattern: "PUT /v1/tenants/{tenant}/agents/{agent}/keys/{key}", json: s.attachKey},
 		{pattern: "POST /v1/tenants/{tenant}/agents/{agent}/start", json: s.start},
 		{pattern: "POST /v1/tenants/{tenant}/agents/{agent}/stop", json: s.stop},
-		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}/status", json: s.status},
-		{pattern: "POST /v1/tenants/{tenant}/agents/{agent}/commands", json: s.command},
+		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}/status", notifier: true, json: s.status},
+		{pattern: "POST /v1/tenants/{tenant}/agents/{agent}/commands", notifier: true, json: s.command},
 		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}/events", json: s.events},
-		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}/events/stream", raw: s.stream},
+		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}/events/stream", notifier: true, raw: s.stream},
 	}
 }
 
@@ -121,9 +122,18 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range s.routes() {
 		mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) {
-			if !rt.open && !s.authorized(r) {
-				s.fail(w, r, &apiError{http.StatusUnauthorized, "unauthorized", "a valid bearer token is required"})
-				return
+			switch s.bearer(r) {
+			case fullToken:
+			case notifierToken:
+				if !rt.open && !rt.notifier {
+					s.fail(w, r, &apiError{http.StatusForbidden, "forbidden", "the notifier's token cannot use this route"})
+					return
+				}
+			default:
+				if !rt.open {
+					s.fail(w, r, &apiError{http.StatusUnauthorized, "unauthorized", "a valid bearer token is required"})
+					return
+				}
 			}
 			if rt.raw != nil {
 				rt.raw(w, r)
@@ -146,10 +156,33 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-func (s *Server) authorized(r *http.Request) bool {
+// Which token a request carries.
+type tokenKind int
+
+const (
+	noToken tokenKind = iota
+	notifierToken
+	fullToken
+)
+
+func (s *Server) bearer(r *http.Request) tokenKind {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	a, b := sha256.Sum256([]byte(got)), sha256.Sum256([]byte(s.Token))
-	return ok && s.Token != "" && subtle.ConstantTimeCompare(a[:], b[:]) == 1
+	switch {
+	case !ok:
+		return noToken
+	case same(got, s.Token):
+		return fullToken
+	case same(got, s.NotifierToken):
+		return notifierToken
+	}
+	return noToken
+}
+
+// same compares a presented token with a configured one in constant time;
+// an empty configured token matches nothing.
+func same(got, want string) bool {
+	a, b := sha256.Sum256([]byte(got)), sha256.Sum256([]byte(want))
+	return want != "" && subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
 // apiError is a failure with its HTTP status and code.

@@ -411,8 +411,10 @@ func serve(ctx context.Context, svc *fleet.Service, e env, out io.Writer) error 
 }
 
 // startAPI opens the engine API, for the app, when ENGINE_API_TOKEN is set.
+// ENGINE_NOTIFIER_TOKEN, when set, is a second token for the notifier that
+// opens only the routes it needs.
 func startAPI(ctx context.Context, svc *fleet.Service, sup *fleet.Supervisor, e env, logf func(string, ...any)) error {
-	token := os.Getenv("ENGINE_API_TOKEN")
+	token, notifier := os.Getenv("ENGINE_API_TOKEN"), os.Getenv("ENGINE_NOTIFIER_TOKEN")
 	if token == "" {
 		logf("engine API off; set ENGINE_API_TOKEN to open it")
 		return nil
@@ -420,11 +422,14 @@ func startAPI(ctx context.Context, svc *fleet.Service, sup *fleet.Supervisor, e 
 	if len(token) < 32 {
 		return errors.New("ENGINE_API_TOKEN must be at least 32 characters")
 	}
+	if notifier != "" && (len(notifier) < 32 || notifier == token) {
+		return errors.New("ENGINE_NOTIFIER_TOKEN must be at least 32 characters and differ from ENGINE_API_TOKEN")
+	}
 	l, err := net.Listen("tcp", cmp.Or(os.Getenv("ENGINE_API_ADDR"), ":8080"))
 	if err != nil {
 		return fmt.Errorf("engine API: %w", err)
 	}
-	srv := &server.Server{Fleet: svc, Agents: sup, Token: token, Commit: commit, Logf: logf,
+	srv := &server.Server{Fleet: svc, Agents: sup, Token: token, NotifierToken: notifier, Commit: commit, Logf: logf,
 		Report: func(ctx context.Context, spec fleet.Spec) (agent.Report, error) {
 			return buildEngine(spec.Config, fleet.Keys{}, e, nil, nil).Report(ctx)
 		}}

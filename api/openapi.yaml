@@ -324,6 +324,7 @@ components:
     token:
       type: http
       scheme: bearer
+      description: ENGINE_API_TOKEN opens every route. ENGINE_NOTIFIER_TOKEN, the notifier's, opens only a tenant's agent list, an agent's status, its commands and its event stream; elsewhere it gets 403 forbidden.
   parameters:
     tenant:
       name: tenant

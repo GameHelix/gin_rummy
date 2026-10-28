@@ -29,7 +29,10 @@ import (
 	"github.com/candylario/trader/internal/vault"
 )
 
-const token = "test-token-0123456789abcdef0123456789"
+const (
+	token          = "test-token-0123456789abcdef0123456789"
+	notifierBearer = "notifier-token-0123456789abcdef01234"
+)
 
 type rig struct {
 	t      *testing.T
@@ -82,7 +85,7 @@ func newRig(t *testing.T) *rig {
 			pg.Ship(ctx, store, agent.EventsDir(spec.Config), func() (pg.Agent, bool) { return who, true }, 50*time.Millisecond, t.Logf)
 		}}
 	r.sup = sup
-	srv := &Server{Fleet: svc, Agents: sup, Token: token, Commit: "test", Logf: t.Logf,
+	srv := &Server{Fleet: svc, Agents: sup, Token: token, NotifierToken: notifierBearer, Commit: "test", Logf: t.Logf,
 		Report: func(ctx context.Context, spec fleet.Spec) (agent.Report, error) { return build(spec).Report(ctx) }}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -522,4 +525,53 @@ func TestHealthReportsAnAgentThatCannotRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.waitFor("health to recover once the agent is stopped", func() bool { status, _ := r.health(); return status == http.StatusOK })
+}
+
+func TestTheNotifiersTokenOpensOnlyItsRoutes(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	tn, err := r.client.CreateTenant(ctx, api.NewTenant{Name: "alice", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := r.client.CreateAgent(ctx, tn.ID, api.NewAgent{Name: "btc-eth", Mode: "testnet", Config: agentConfig(t, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier := &api.Client{BaseURL: r.client.BaseURL, Token: notifierBearer}
+	if agents, err := notifier.Agents(ctx, tn.ID); err != nil || len(agents) != 1 {
+		t.Fatalf("the notifier lists agents: %v %v", agents, err)
+	}
+	if _, err := notifier.Status(ctx, tn.ID, ag.ID); code(err) != "no_account" {
+		t.Fatalf("the notifier reads status: %v", err)
+	}
+	if _, err := notifier.Command(ctx, tn.ID, ag.ID, api.Command{Command: api.Decide, Via: "telegram"}); code(err) != "not_running" {
+		t.Fatalf("the notifier sends commands: %v", err)
+	}
+	sctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	if err := notifier.Stream(sctx, tn.ID, ag.ID, 0, func(api.Event) error { return nil }); code(err) != "" {
+		t.Fatalf("the notifier streams events: %v", err)
+	}
+	for what, call := range map[string]func() error{
+		"tenants": func() error { _, err := notifier.Tenant(ctx, tn.ID); return err },
+		"plans":   func() error { _, err := notifier.SetPlan(ctx, tn.ID, plan); return err },
+		"keys":    func() error { _, err := notifier.Keys(ctx, tn.ID); return err },
+		"starts":  func() error { _, err := notifier.Start(ctx, tn.ID, ag.ID); return err },
+		"stops":   func() error { _, err := notifier.Stop(ctx, tn.ID, ag.ID); return err },
+		"configs": func() error { _, err := notifier.Config(ctx, tn.ID, ag.ID, 0); return err },
+		"events":  func() error { _, err := notifier.Events(ctx, tn.ID, ag.ID, 0, 10); return err },
+		"closing": func() error { _, err := notifier.CloseTenant(ctx, tn.ID); return err },
+		"new tenants": func() error {
+			_, err := notifier.CreateTenant(ctx, api.NewTenant{Name: "mallory", Plan: plan})
+			return err
+		},
+	} {
+		if err := call(); code(err) != "forbidden" {
+			t.Errorf("the notifier's token must not reach %s: %v", what, err)
+		}
+	}
+	if _, err := (&api.Client{BaseURL: r.client.BaseURL, Token: "wrong"}).Agents(ctx, tn.ID); code(err) != "unauthorized" {
+		t.Fatalf("a wrong token is unauthorized: %v", err)
+	}
 }
