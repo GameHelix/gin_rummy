@@ -47,6 +47,8 @@ Multi-user engine (needs DATABASE_URL and ENGINE_MASTER_KEY):
                           engine API on ENGINE_API_ADDR (:8080) when
                           ENGINE_API_TOKEN is set
   trader import           move this standalone agent into the database
+  trader vault rewrap     seal every stored key under the current master key,
+                          after a rotation (see the README)
   trader tenant add --name NAME --plan FILE
   trader tenant plan --tenant ID --plan FILE
   trader key add --tenant ID --kind anthropic|binance [--mode testnet|live] [--label TEXT] < key.json

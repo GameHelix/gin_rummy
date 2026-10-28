@@ -50,7 +50,7 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	master, _ := vault.NewMasterKey()
-	v, _ := vault.New(master, 1)
+	v, _ := vault.New(master)
 	now := func() time.Time { return testkit.At(t, "2026-10-25 12:00") }
 	r := &rig{t: t, ex: testkit.NewBinance(now)}
 	model := &testkit.API{WantKey: "sk-alice", Script: []func(string) (int, any){testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, testkit.CitePrices)}}

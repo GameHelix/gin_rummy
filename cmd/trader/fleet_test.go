@@ -105,3 +105,41 @@ func TestTenantKeyAndAgentCommands(t *testing.T) {
 		t.Fatalf("plan: %v %s", err, out.String())
 	}
 }
+
+func TestVaultRewrapAfterAKeyRotation(t *testing.T) {
+	cfg, e, _ := setup(t)
+	fleetEnv(t)
+	old := os.Getenv("ENGINE_MASTER_KEY")
+	ctx := context.Background()
+	dir := filepath.Dir(cfg)
+	plan := filepath.Join(dir, "plan.json")
+	os.WriteFile(plan, []byte(`{"symbols":["BTCUSDT"],"max_agents":1,"min_decision_interval_hours":1,"max_event_decisions_per_day":8}`), 0o600)
+	var out bytes.Buffer
+	if err := run(ctx, []string{"tenant", "add", "--name", "bob", "--plan", plan, "--config", cfg}, &out, e); err != nil {
+		t.Fatal(err)
+	}
+	tenant := idPattern.FindString(out.String())
+	e.In = strings.NewReader(`{"key":"test-key"}`)
+	if err := run(ctx, []string{"key", "add", "--tenant", tenant, "--kind", "anthropic", "--config", cfg}, &out, e); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ := vault.NewMasterKey()
+	t.Setenv("ENGINE_MASTER_KEY", "2:"+fresh)
+	if err := run(ctx, []string{"key", "list", "--tenant", tenant, "--config", cfg}, &out, e); err != nil {
+		t.Fatal("listing needs no decryption:", err)
+	}
+	t.Setenv("ENGINE_MASTER_KEY_PREVIOUS", old)
+	out.Reset()
+	if err := run(ctx, []string{"vault", "rewrap", "--config", cfg}, &out, e); err != nil || !strings.Contains(out.String(), "re-wrapped 1 keys under master key version 2") {
+		t.Fatalf("rewrap: %v %s", err, out.String())
+	}
+	t.Setenv("ENGINE_MASTER_KEY_PREVIOUS", "")
+	out.Reset()
+	if err := run(ctx, []string{"vault", "rewrap", "--config", cfg}, &out, e); err != nil || !strings.Contains(out.String(), "re-wrapped 0 keys") {
+		t.Fatalf("nothing left to rewrap: %v %s", err, out.String())
+	}
+	t.Setenv("ENGINE_MASTER_KEY", "nonsense")
+	if err := run(ctx, []string{"vault", "rewrap", "--config", cfg}, &out, e); err == nil || !strings.Contains(err.Error(), "ENGINE_MASTER_KEY") {
+		t.Fatalf("a bad master key is refused by name: %v", err)
+	}
+}

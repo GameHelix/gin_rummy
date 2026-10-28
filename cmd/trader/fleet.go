@@ -30,10 +30,10 @@ import (
 	"github.com/candylario/trader/internal/vault"
 )
 
-var fleetCommands = map[string]bool{"serve": true, "import": true, "tenant": true, "key": true, "agent": true}
+var fleetCommands = map[string]bool{"serve": true, "import": true, "tenant": true, "key": true, "agent": true, "vault": true}
 
 var fleetFlags = map[string][]string{
-	"serve": {"config"}, "import": {"config"},
+	"serve": {"config"}, "import": {"config"}, "vault rewrap": {"config"},
 	"tenant add":   {"config", "name", "plan"},
 	"tenant plan":  {"config", "tenant", "plan"},
 	"key add":      {"config", "tenant", "kind", "label", "mode"},
@@ -49,7 +49,7 @@ var fleetFlags = map[string][]string{
 
 func runFleet(ctx context.Context, args []string, out io.Writer, e env) error {
 	cmd, rest := args[0], args[1:]
-	if cmd == "tenant" || cmd == "key" || cmd == "agent" {
+	if cmd == "tenant" || cmd == "key" || cmd == "agent" || cmd == "vault" {
 		if len(rest) == 0 {
 			return fmt.Errorf("choose a %s command; run `trader help`", cmd)
 		}
@@ -258,6 +258,13 @@ func runFleet(ctx context.Context, args []string, out io.Writer, e env) error {
 			fmt.Fprintf(out, "%s  %-12s %-8s %-8s version %d\n", a.ID, a.Name, a.Mode, a.Status, a.Version)
 		}
 		return err
+	case "vault rewrap":
+		n, err := svc.Rewrap(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "re-wrapped %d keys under master key version %d\n", n, svc.Vault.Version())
+		return nil
 	}
 	return nil
 }
@@ -276,7 +283,15 @@ func openFleet(ctx context.Context, defaults config.Config, e env) (*fleet.Servi
 	if url == "" || master == "" {
 		return nil, nil, errors.New("set DATABASE_URL and ENGINE_MASTER_KEY")
 	}
-	v, err := vault.New(master, 1)
+	// Older master keys, kept while stored keys are re-wrapped under the
+	// current one.
+	var previous []string
+	for _, k := range strings.Split(os.Getenv("ENGINE_MASTER_KEY_PREVIOUS"), ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			previous = append(previous, k)
+		}
+	}
+	v, err := vault.New(master, previous...)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -611,3 +611,33 @@ func (s *Service) load(ctx context.Context, tenant, agent uuid.UUID) (Spec, pg.A
 	}
 	return Spec{Tenant: tenant, Agent: agent, Name: row.Name, Version: row.Version, Config: c}, row, nil
 }
+
+// Rewrap seals every stored key's data key under the current master key,
+// after a rotation, and returns how many keys it moved. A key revoked
+// meanwhile is skipped. Run it with the old key still loaded; afterwards
+// the engine needs only the new one.
+func (s *Service) Rewrap(ctx context.Context) (int, error) {
+	stale, err := s.Store.StaleCredentials(ctx, s.Vault.Version())
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, k := range stale {
+		c, err := s.Store.Credential(ctx, k.Tenant, k.ID)
+		if errors.Is(err, pg.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return n, err
+		}
+		sealed, err := s.Vault.Rewrap(owner(k.Tenant, c.ID, c.Kind), c.Sealed)
+		if err != nil {
+			return n, fmt.Errorf("key %s of tenant %s: %w", c.ID, k.Tenant, err)
+		}
+		if err := s.Store.RewrapCredential(ctx, k.Tenant, c.ID, sealed); err != nil && !errors.Is(err, pg.ErrNotFound) {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}

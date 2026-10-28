@@ -350,3 +350,42 @@ func (s *Store) Runnable(ctx context.Context) ([]Runnable, error) {
 	}
 	return out, rows.Err()
 }
+
+// StaleKey names a key sealed under a master key version that is not the
+// current one.
+type StaleKey struct {
+	Tenant uuid.UUID
+	ID     uuid.UUID
+}
+
+// StaleCredentials lists, across tenants, the keys still in use that are
+// sealed under any master key version but current.
+func (s *Store) StaleCredentials(ctx context.Context, current int) ([]StaleKey, error) {
+	rows, err := s.pool.Query(ctx, "select tenant_id, id from credentials_to_rewrap($1)", current)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StaleKey
+	for rows.Next() {
+		var k StaleKey
+		if err := rows.Scan(&k.Tenant, &k.ID); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// RewrapCredential stores a key's data key as sealed under another master
+// key version. The secret's own ciphertext is unchanged.
+func (s *Store) RewrapCredential(ctx context.Context, tenant, id uuid.UUID, sealed vault.Sealed) error {
+	return s.inTenant(ctx, tenant, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, "update credentials set wrapped_key = $2, key_nonce = $3, master_version = $4 where id = $1 and revoked_at is null",
+			id, sealed.WrappedKey, sealed.KeyNonce, sealed.MasterVersion)
+		if err == nil && tag.RowsAffected() == 0 {
+			err = ErrNotFound
+		}
+		return err
+	})
+}

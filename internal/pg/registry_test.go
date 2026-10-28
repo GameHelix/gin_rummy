@@ -56,7 +56,7 @@ func TestTenantsAgentsVersionsAndKeys(t *testing.T) {
 	}
 
 	master, _ := vault.NewMasterKey()
-	v, _ := vault.New(master, 1)
+	v, _ := vault.New(master)
 	id, model := uuid.New(), uuid.New()
 	sealed, _ := v.Seal([]byte(id.String()), []byte(`{"key":"k","secret":"s"}`))
 	for kind, cid := range map[string]uuid.UUID{"binance": id, "anthropic": model} {

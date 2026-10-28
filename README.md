@@ -5,7 +5,7 @@ An AI crypto trading agent for Binance spot. It watches BTC and ETH around the c
 ## Setup
 
 1. **Binance:** create an API key with spot trading on and withdrawals off, ideally restricted to your IP. For a trial run, use testnet keys from testnet.binance.vision.
-2. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money. `POSTGRES_PASSWORD` protects the engine's database. `ENGINE_MASTER_KEY` (`openssl rand -base64 32`) encrypts the keys stored there; back it up, because without it they cannot be read. `ENGINE_API_TOKEN` (`openssl rand -hex 32`) opens the engine API. A user's model and exchange keys are not settings: they go in through the app, into the vault. Only a standalone run (`check`, `init`, `import`, `run`) reads `ANTHROPIC_API_KEY`, `BINANCE_API_KEY` and `BINANCE_API_SECRET` from `.env`.
+2. **Env:** `cp .env.example .env` and fill it in. `TRADER_MODE=testnet` uses test funds; `live` trades real money. `POSTGRES_PASSWORD` protects the engine's database. `ENGINE_MASTER_KEY` (`openssl rand -base64 32`) encrypts the keys stored there; back it up, because without it they cannot be read. `ENGINE_API_TOKEN` (`openssl rand -hex 32`) opens the engine API for the app; `ENGINE_NOTIFIER_TOKEN` (another `openssl rand -hex 32`) is the notifier's and opens only what it needs. `ENGINE_MASTER_KEY_PREVIOUS` holds an older master key during a rotation (see Rotating the master key). A user's model and exchange keys are not settings: they go in through the app, into the vault. Only a standalone run (`check`, `init`, `import`, `run`) reads `ANTHROPIC_API_KEY`, `BINANCE_API_KEY` and `BINANCE_API_SECRET` from `.env`.
 
 ```sh
 mkdir -p data                           # on Linux: sudo chown 65532 data
@@ -45,11 +45,20 @@ The settings come from the central `../.env` through `../infra/env.sh` when infr
 
 ## Engine API
 
-The app's and the notifier's only way in, on `127.0.0.1:8080` with `Authorization: Bearer $ENGINE_API_TOKEN`. It takes the chat commands (status, decide, stop, resume, sell all) and manages tenants, plans, keys, agents and configs; each agent's audit log comes as history or a live stream. The contract is [api/openapi.yaml](api/openapi.yaml); package `api` is its Go client.
+The app's and the notifier's only way in, on `127.0.0.1:8080` with `Authorization: Bearer $ENGINE_API_TOKEN`. The notifier uses `ENGINE_NOTIFIER_TOKEN` instead, which opens only a tenant's agent list, an agent's status, its commands and its event stream, so a leak there cannot close accounts or swap keys. It takes the chat commands (status, decide, stop, resume, sell all) and manages tenants, plans, keys, agents and configs; each agent's audit log comes as history or a live stream. The contract is [api/openapi.yaml](api/openapi.yaml); package `api` is its Go client.
 
 ```sh
 curl -H "Authorization: Bearer $ENGINE_API_TOKEN" 127.0.0.1:8080/v1/tenants/ID/agents/ID/status
 ```
+
+## Rotating the master key
+
+Every stored key is sealed under a data key of its own, and only that data key is encrypted with the master key, so a rotation re-wraps data keys and never touches the secrets. Each row records the master key version it was sealed under; the engine opens rows with the key of their version and seals new rows with the current one.
+
+1. Make a new key: `openssl rand -base64 32`. In the central `.env`, set `ENGINE_MASTER_KEY=2:NEW` (the version before the colon, one more than the old one; a key without a version is version 1) and `ENGINE_MASTER_KEY_PREVIOUS=OLD`.
+2. `./deploy.sh deploy@SERVER`. New keys now seal under version 2; old rows still open.
+3. On the server: `cd /srv/trader && docker compose run --rm trader vault rewrap`. It prints how many keys it moved; run it again to see 0.
+4. Clear `ENGINE_MASTER_KEY_PREVIOUS` and deploy again. Keep the old key next to the backup key pair until every backup made under it has expired (30 days): a restored database from before the rewrap needs it in `ENGINE_MASTER_KEY_PREVIOUS` again.
 
 ## Rules
 

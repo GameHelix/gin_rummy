@@ -40,7 +40,7 @@ func service(t *testing.T) *Service {
 	}
 	t.Cleanup(store.Close)
 	master, _ := vault.NewMasterKey()
-	v, _ := vault.New(master, 1)
+	v, _ := vault.New(master)
 	return &Service{Store: store, Vault: v, DataDir: t.TempDir(), Model: "test-model"}
 }
 
@@ -365,5 +365,61 @@ func TestClosingATenantStopsItsAgentsAndErasesItsKeys(t *testing.T) {
 	}
 	if b, _ := s.Store.Tenant(ctx, bob.ID); b.Status != "active" || b.Name != "bob@example.com" {
 		t.Fatalf("another tenant changed: %+v", b)
+	}
+}
+
+func TestRotatingTheMasterKeyRewrapsStoredKeys(t *testing.T) {
+	s := service(t)
+	ctx := context.Background()
+	k1, _ := vault.NewMasterKey()
+	k2, _ := vault.NewMasterKey()
+	s.Vault, _ = vault.New(k1)
+	tn, _, err := s.AddTenant(ctx, uuid.Nil, "alice", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant := tn.ID
+	var keys []uuid.UUID
+	for kind, raw := range map[string]string{KindAnthropic: `{"key":"sk-alice"}`, KindBinance: `{"key":"venue-key","secret":"venue-secret"}`} {
+		c, _, err := s.AddKey(ctx, tenant, NewKey{Kind: kind, Label: "main", Mode: "testnet", Secret: []byte(raw)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, c.ID)
+	}
+	gone, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: "old", Mode: "testnet", Secret: []byte(`{"key":"x","secret":"y"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RevokeKey(ctx, tenant, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: "btc-eth", Mode: "testnet", Config: agentConfig(t, nil), Keys: keys, By: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both keys loaded: the rewrap moves every key in use to version 2.
+	if s.Vault, err = vault.New("2:"+k2, k1); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.Rewrap(ctx); err != nil || n != 2 {
+		t.Fatalf("rewrapped %d keys: %v", n, err)
+	}
+	if n, err := s.Rewrap(ctx); err != nil || n != 0 {
+		t.Fatalf("a second rewrap finds nothing: %d %v", n, err)
+	}
+	// The old key dropped: the agent's keys still open, the revoked one stays under version 1.
+	if s.Vault, err = vault.New("2:" + k2); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := s.Spec(ctx, tenant, row.ID)
+	if err != nil || spec.Keys.Anthropic != "sk-alice" || spec.Keys.BinanceKey != "venue-key" || spec.Keys.BinanceSecret != "venue-secret" {
+		t.Fatalf("keys after the rotation: %+v %v", spec.Keys, err)
+	}
+	if c, err := s.Store.Credential(ctx, tenant, gone.ID); err != nil || c.Sealed.MasterVersion != 1 {
+		t.Fatalf("a revoked key is left alone: %+v %v", c.Sealed.MasterVersion, err)
+	}
+	if c, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: "new", Mode: "testnet", Secret: []byte(`{"key":"a","secret":"b"}`)}); err != nil || c.Sealed.MasterVersion != 2 {
+		t.Fatalf("new keys seal under the current version: %+v %v", c, err)
 	}
 }
