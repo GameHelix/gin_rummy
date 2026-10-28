@@ -36,9 +36,18 @@ type Client struct {
 	Key     string
 	Secret  string
 	Now     func() time.Time
+	// Logf, when set, reports rate limits and the request weight as it
+	// grows.
+	Logf func(format string, args ...any)
 
 	mu     sync.Mutex
 	offset time.Duration
+}
+
+func (c *Client) logf(format string, args ...any) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+	}
 }
 
 // APIError is a response Binance rejected. The request was not executed
@@ -70,7 +79,106 @@ func (c *Client) now() time.Time {
 	return time.Now()
 }
 
+// request sends a request, retrying a read a few times when Binance asks
+// for a retry. An order is sent once: after a failure its outcome is
+// unknown, and the caller settles it by querying the order.
 func (c *Client) request(ctx context.Context, method, base, path string, q url.Values, signed bool, out any) error {
+	for attempt := 0; ; attempt++ {
+		err := c.once(ctx, method, base, path, cloneValues(q), signed, out)
+		if method != http.MethodGet || attempt == len(retryWaits) || !transient(err) || ctx.Err() != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(retryWaits[attempt]):
+		}
+	}
+}
+
+// retryWaits are the pauses before each retry of a read.
+var retryWaits = []time.Duration{time.Second, 3 * time.Second}
+
+// transient reports a failure Binance asks to retry: a connection or read
+// failure, a server error, or one of its own "try again" codes. A rate
+// limit is not transient: nothing is sent until it ends.
+func transient(err error) bool {
+	var ne *netError
+	var api *APIError
+	switch {
+	case errors.As(err, &ne):
+		return true
+	case errors.As(err, &api):
+		return api.HTTPStatus >= 500 || api.Code == -1000 || api.Code == -1001 || api.Code == -1006 || api.Code == -1007 || api.Code == -1008
+	}
+	return false
+}
+
+// Binance limits request weight per IP: past the limit it answers 429, and
+// if requests keep coming it bans the IP (418) for minutes to days. Every
+// agent in a process leaves from the same IP, so a limit pauses all of
+// them: one gate per host holds every call until Retry-After has passed.
+type gate struct {
+	mu    sync.Mutex
+	until time.Time
+	band  int // the last reported tenth of the weight limit
+}
+
+var gates sync.Map // base URL → *gate
+
+func gateFor(base string) *gate {
+	g, _ := gates.LoadOrStore(base, &gate{})
+	return g.(*gate)
+}
+
+// RateLimited is a request not sent because Binance asked this IP to wait.
+type RateLimited struct{ Until time.Time }
+
+func (e *RateLimited) Error() string {
+	return "Binance is rate-limiting this server until " + e.Until.UTC().Format("15:04:05 UTC")
+}
+
+// weightLimit is Binance's request weight per IP and minute on /api.
+const weightLimit = 6000
+
+// observe notes a reply's rate-limit headers: a 429 or 418 pauses the host
+// for Retry-After, and the request weight is reported each time it passes
+// another tenth of the limit within a minute.
+func (c *Client) observe(base string, resp *http.Response) {
+	g := gateFor(base)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 418 {
+		wait := time.Minute
+		if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s > 0 {
+			wait = time.Duration(s) * time.Second
+		}
+		if until := c.now().Add(wait); until.After(g.until) {
+			g.until = until
+			c.logf("Binance %s answered %d: no calls until %s", base, resp.StatusCode, until.UTC().Format("15:04:05 UTC"))
+		}
+	}
+	if w, err := strconv.Atoi(resp.Header.Get("X-MBX-USED-WEIGHT-1M")); err == nil {
+		band := w * 10 / weightLimit
+		if band > g.band {
+			c.logf("Binance %s: request weight %d of %d this minute", base, w, weightLimit)
+		}
+		g.band = band
+	}
+}
+
+// paused reports until when the host takes no calls, if it is paused.
+func (c *Client) paused(base string) (time.Time, bool) {
+	g := gateFor(base)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.until, c.now().Before(g.until)
+}
+
+func (c *Client) once(ctx context.Context, method, base, path string, q url.Values, signed bool, out any) error {
+	if until, ok := c.paused(base); ok {
+		return &RateLimited{Until: until}
+	}
 	if q == nil {
 		q = url.Values{}
 	}
@@ -103,6 +211,7 @@ func (c *Client) request(ctx context.Context, method, base, path string, q url.V
 		return &netError{fmt.Errorf("%s %s: %w", method, path, err)}
 	}
 	defer resp.Body.Close()
+	c.observe(base, resp)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
 		return &netError{fmt.Errorf("%s %s: %w", method, path, err)}

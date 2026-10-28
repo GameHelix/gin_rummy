@@ -28,7 +28,7 @@ func (e *Engine) tick(ctx context.Context) {
 		e.recover(ctx)
 	}
 	if err := e.watch(ctx); err != nil {
-		e.alert(ctx, "prices", "⚠️ Price data unavailable: "+err.Error())
+		e.alert(ctx, "prices", fmt.Sprintf("⚠️ Price data unavailable: %v. No trades or limit checks until it is back; retrying every %d seconds.", err, e.Config.PollSeconds))
 		return
 	}
 	equity, err := e.st.Ledger.Equity(e.prices)

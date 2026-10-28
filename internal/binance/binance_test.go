@@ -3,6 +3,7 @@ package binance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -155,5 +156,71 @@ func TestMarketDataAndRules(t *testing.T) {
 	b := s["BTCUSDT"]
 	if err != nil || !b.Trading || b.Base != "BTC" || b.StepSize.String() != "0.00001" || b.MinNotional.String() != "5" || b.MaxQty.String() != "126.39141716" {
 		t.Fatalf("rules %+v %v", b, err)
+	}
+}
+
+func TestReadsAreRetriedWhenBinanceAsksButOrdersNever(t *testing.T) {
+	defer func(w []time.Duration) { retryWaits = w }(retryWaits)
+	retryWaits = []time.Duration{time.Millisecond, time.Millisecond}
+	const tryAgain = `{"code":-1001,"msg":"Internal error; unable to process your request. Please try again."}`
+	var prices, orders atomic.Int32
+	c := server(t, func(w http.ResponseWriter, r *http.Request, q url.Values) {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			switch prices.Add(1) {
+			case 1:
+				w.WriteHeader(400)
+				w.Write([]byte(tryAgain))
+			case 2:
+				w.WriteHeader(503)
+			default:
+				w.Write([]byte(`[{"symbol":"BTCUSDT","price":"80556.00000000"}]`))
+			}
+		case "/api/v3/order":
+			orders.Add(1)
+			w.WriteHeader(500)
+			w.Write([]byte(tryAgain))
+		}
+	})
+	ctx := context.Background()
+	if p, err := c.Prices(ctx, []string{"BTCUSDT"}); err != nil || p["BTCUSDT"].String() != "80556" || prices.Load() != 3 {
+		t.Fatalf("a read is retried: %v %v after %d calls", p, err, prices.Load())
+	}
+	if _, err := c.PlaceMarket(ctx, OrderRequest{Symbol: "BTCUSDT", Side: "BUY", QuoteQty: num.MustParse("10"), ClientID: "x"}); !errors.Is(err, ErrUnknown) || orders.Load() != 1 {
+		t.Fatalf("an order is sent once: %v after %d calls", err, orders.Load())
+	}
+}
+
+func TestARateLimitPausesEveryCallUntilRetryAfter(t *testing.T) {
+	var calls atomic.Int32
+	c := server(t, func(w http.ResponseWriter, r *http.Request, q url.Values) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(429)
+			w.Write([]byte(`{"code":-1003,"msg":"Too much request weight used"}`))
+			return
+		}
+		w.Header().Set("X-MBX-USED-WEIGHT-1M", "1250")
+		w.Write([]byte(`[{"symbol":"BTCUSDT","price":"80556.00000000"}]`))
+	})
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	c.Now = func() time.Time { return now }
+	var logged []string
+	c.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	ctx := context.Background()
+	var api *APIError
+	if _, err := c.Prices(ctx, []string{"BTCUSDT"}); !errors.As(err, &api) || api.HTTPStatus != 429 || calls.Load() != 1 {
+		t.Fatalf("a rate limit is not retried: %v after %d calls", err, calls.Load())
+	}
+	var limited *RateLimited
+	if _, err := c.Klines(ctx, "BTCUSDT", "1m", 2, time.Time{}); !errors.As(err, &limited) || !limited.Until.Equal(now.Add(30*time.Second)) || calls.Load() != 1 {
+		t.Fatalf("the next call must wait without reaching Binance: %v after %d calls", err, calls.Load())
+	}
+	now = now.Add(31 * time.Second)
+	if _, err := c.Prices(ctx, []string{"BTCUSDT"}); err != nil || calls.Load() != 2 {
+		t.Fatalf("after Retry-After calls go out again: %v, %d calls", err, calls.Load())
+	}
+	if len(logged) != 2 || !strings.Contains(logged[0], "no calls until 12:00:30 UTC") || !strings.Contains(logged[1], "request weight 1250 of 6000") {
+		t.Fatalf("logged %q", logged)
 	}
 }
