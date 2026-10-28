@@ -39,6 +39,9 @@ type Client struct {
 	// Logf, when set, reports rate limits and the request weight as it
 	// grows.
 	Logf func(format string, args ...any)
+	// Cache, when set, shares public market data with every other client
+	// that has it.
+	Cache *Cache
 
 	mu     sync.Mutex
 	offset time.Duration
@@ -79,21 +82,117 @@ func (c *Client) now() time.Time {
 	return time.Now()
 }
 
-// request sends a request, retrying a read a few times when Binance asks
-// for a retry. An order is sent once: after a failure its outcome is
-// unknown, and the caller settles it by querying the order.
+// request sends a request and decodes the reply into out. Public market
+// data is shared through the cache when there is one.
 func (c *Client) request(ctx context.Context, method, base, path string, q url.Values, signed bool, out any) error {
+	var body []byte
+	var err error
+	if c.Cache != nil && method == http.MethodGet && !signed && cacheable(path, q) {
+		body, err = c.Cache.get(ctx, base+path+"?"+q.Encode(), c.now, func() ([]byte, error) { return c.fetch(ctx, method, base, path, q, signed) })
+	} else {
+		body, err = c.fetch(ctx, method, base, path, q, signed)
+	}
+	if err != nil {
+		return err
+	}
+	if out != nil {
+		if err := json.Unmarshal(body, out); err != nil {
+			return &netError{fmt.Errorf("%s %s: unreadable response: %w", method, path, err)}
+		}
+	}
+	return nil
+}
+
+// cacheable reports whether a read is the same for every agent: candles,
+// prices and trading rules. A candle read from a given time is a one-off,
+// so it is not kept.
+func cacheable(path string, q url.Values) bool {
+	switch path {
+	case "/api/v3/klines":
+		return q.Get("startTime") == ""
+	case "/api/v3/ticker/price", "/api/v3/exchangeInfo":
+		return true
+	}
+	return false
+}
+
+// fetch sends a request, retrying a read a few times when Binance asks for
+// a retry. An order is sent once: after a failure its outcome is unknown,
+// and the caller settles it by querying the order.
+func (c *Client) fetch(ctx context.Context, method, base, path string, q url.Values, signed bool) ([]byte, error) {
 	for attempt := 0; ; attempt++ {
-		err := c.once(ctx, method, base, path, cloneValues(q), signed, out)
+		body, err := c.once(ctx, method, base, path, cloneValues(q), signed)
 		if method != http.MethodGet || attempt == len(retryWaits) || !transient(err) || ctx.Err() != nil {
-			return err
+			return body, err
 		}
 		select {
 		case <-ctx.Done():
-			return err
+			return nil, err
 		case <-time.After(retryWaits[attempt]):
 		}
 	}
+}
+
+// Cache shares public market data between the clients of one process.
+// Agents on the same coins ask for the same candles and prices from one
+// IP, so a reply serves every client that asks within TTL, and one request
+// in flight is awaited rather than repeated. Replies are kept by host, so
+// the testnet's prices never serve a live agent, while candles from the
+// data host serve both.
+type Cache struct {
+	TTL time.Duration
+
+	mu      sync.Mutex
+	entries map[string]*entry
+}
+
+type entry struct {
+	at    time.Time
+	body  []byte
+	err   error
+	ready chan struct{} // closed once the reply is in
+}
+
+// get returns the reply for key: a fresh one kept from an earlier call,
+// the one a call in flight is about to get, or the result of do.
+func (c *Cache) get(ctx context.Context, key string, now func() time.Time, do func() ([]byte, error)) ([]byte, error) {
+	c.mu.Lock()
+	if c.entries == nil {
+		c.entries = map[string]*entry{}
+	}
+	if e := c.entries[key]; e != nil {
+		select {
+		case <-e.ready:
+			if e.err == nil && now().Sub(e.at) < c.TTL {
+				c.mu.Unlock()
+				return e.body, nil
+			}
+		default:
+			c.mu.Unlock()
+			select {
+			case <-e.ready:
+				return e.body, e.err
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	e := &entry{ready: make(chan struct{})}
+	c.entries[key] = e
+	for k, old := range c.entries {
+		select {
+		case <-old.ready:
+			if now().Sub(old.at) >= c.TTL {
+				delete(c.entries, k)
+			}
+		default:
+		}
+	}
+	c.mu.Unlock()
+	e.body, e.err = do()
+	e.at = now()
+	close(e.ready)
+	return e.body, e.err
 }
 
 // retryWaits are the pauses before each retry of a read.
@@ -175,9 +274,10 @@ func (c *Client) paused(base string) (time.Time, bool) {
 	return g.until, c.now().Before(g.until)
 }
 
-func (c *Client) once(ctx context.Context, method, base, path string, q url.Values, signed bool, out any) error {
+// once sends one request and returns the body of a 200 reply.
+func (c *Client) once(ctx context.Context, method, base, path string, q url.Values, signed bool) ([]byte, error) {
 	if until, ok := c.paused(base); ok {
-		return &RateLimited{Until: until}
+		return nil, &RateLimited{Until: until}
 	}
 	if q == nil {
 		q = url.Values{}
@@ -185,7 +285,7 @@ func (c *Client) once(ctx context.Context, method, base, path string, q url.Valu
 	query := q.Encode()
 	if signed {
 		if c.Key == "" || c.Secret == "" {
-			return errors.New("set BINANCE_API_KEY and BINANCE_API_SECRET in .env")
+			return nil, errors.New("set BINANCE_API_KEY and BINANCE_API_SECRET in .env")
 		}
 		c.mu.Lock()
 		ts := c.now().Add(c.offset).UnixMilli()
@@ -197,7 +297,7 @@ func (c *Client) once(ctx context.Context, method, base, path string, q url.Valu
 	}
 	req, err := http.NewRequestWithContext(ctx, method, base+path+"?"+query, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if signed {
 		req.Header.Set("X-MBX-APIKEY", c.Key)
@@ -208,13 +308,13 @@ func (c *Client) once(ctx context.Context, method, base, path string, q url.Valu
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return &netError{fmt.Errorf("%s %s: %w", method, path, err)}
+		return nil, &netError{fmt.Errorf("%s %s: %w", method, path, err)}
 	}
 	defer resp.Body.Close()
 	c.observe(base, resp)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
-		return &netError{fmt.Errorf("%s %s: %w", method, path, err)}
+		return nil, &netError{fmt.Errorf("%s %s: %w", method, path, err)}
 	}
 	if resp.StatusCode != http.StatusOK {
 		var e struct {
@@ -222,14 +322,9 @@ func (c *Client) once(ctx context.Context, method, base, path string, q url.Valu
 			Msg  string `json:"msg"`
 		}
 		_ = json.Unmarshal(body, &e)
-		return &APIError{HTTPStatus: resp.StatusCode, Code: e.Code, Msg: e.Msg}
+		return nil, &APIError{HTTPStatus: resp.StatusCode, Code: e.Code, Msg: e.Msg}
 	}
-	if out != nil {
-		if err := json.Unmarshal(body, out); err != nil {
-			return &netError{fmt.Errorf("%s %s: unreadable response: %w", method, path, err)}
-		}
-	}
-	return nil
+	return body, nil
 }
 
 // netError is a transport failure or an unreadable reply.

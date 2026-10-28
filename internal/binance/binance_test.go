@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -222,5 +223,90 @@ func TestARateLimitPausesEveryCallUntilRetryAfter(t *testing.T) {
 	}
 	if len(logged) != 2 || !strings.Contains(logged[0], "no calls until 12:00:30 UTC") || !strings.Contains(logged[1], "request weight 1250 of 6000") {
 		t.Fatalf("logged %q", logged)
+	}
+}
+
+func TestAgentsShareMarketDataButNeverAccounts(t *testing.T) {
+	defer func(w []time.Duration) { retryWaits = w }(retryWaits)
+	retryWaits = []time.Duration{time.Millisecond, time.Millisecond}
+	var calls, failing atomic.Int32
+	a := server(t, func(w http.ResponseWriter, r *http.Request, q url.Values) {
+		calls.Add(1)
+		time.Sleep(20 * time.Millisecond) // long enough for callers to overlap
+		if failing.Load() > 0 {
+			failing.Add(-1)
+			w.WriteHeader(503)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v3/klines":
+			w.Write([]byte(`[[1792926000000,"80000.00","80600.00","79900.00","80556.00","12.5",1792929599999,"1006950.00",100,"6","483000","0"]]`))
+		case "/api/v3/ticker/price":
+			w.Write([]byte(`[{"symbol":"BTCUSDT","price":"80556.00000000"},{"symbol":"ETHUSDT","price":"2338.57000000"}]`))
+		case "/api/v3/account":
+			w.Write([]byte(`{"canTrade":true,"commissionRates":{"taker":"0.001"},"balances":[]}`))
+		}
+	})
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	cache := &Cache{TTL: 15 * time.Second}
+	a.Now, a.Cache = clock, cache
+	b := &Client{HTTP: a.HTTP, BaseURL: a.BaseURL, DataURL: a.DataURL, Key: "key", Secret: "secret", Now: clock, Cache: cache}
+	ctx := context.Background()
+	symbols := []string{"BTCUSDT", "ETHUSDT"}
+	for _, c := range []*Client{a, b, a} {
+		if _, err := c.Klines(ctx, "BTCUSDT", "1m", 61, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Prices(ctx, symbols); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("the same candles and prices are fetched once for both clients: %d calls", calls.Load())
+	}
+	if _, err := b.Prices(ctx, []string{"BTCUSDT"}); err != nil || calls.Load() != 3 {
+		t.Fatalf("a different question is a different fetch: %v, %d calls", err, calls.Load())
+	}
+	now = now.Add(15 * time.Second)
+	if _, err := a.Prices(ctx, symbols); err != nil || calls.Load() != 4 {
+		t.Fatalf("after TTL the prices are fetched again: %v, %d calls", err, calls.Load())
+	}
+	// Ten agents asking at once share one request in flight.
+	now = now.Add(15 * time.Second)
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := b.Klines(ctx, "BTCUSDT", "1m", 61, time.Time{}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if calls.Load() != 5 {
+		t.Fatalf("one request in flight serves every caller: %d calls", calls.Load())
+	}
+	// A failure is not kept: the next caller tries the venue again.
+	now = now.Add(15 * time.Second)
+	failing.Store(3)
+	if _, err := a.Prices(ctx, symbols); err == nil || calls.Load() != 8 {
+		t.Fatalf("a read that keeps failing is retried then reported: %v, %d calls", err, calls.Load())
+	}
+	if _, err := b.Prices(ctx, symbols); err != nil || calls.Load() != 9 {
+		t.Fatalf("the failure was not kept: %v, %d calls", err, calls.Load())
+	}
+	// Accounts and one-off candle reads are never shared.
+	for range 2 {
+		if _, err := a.Account(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.Klines(ctx, "BTCUSDT", "1m", 1, now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 13 {
+		t.Fatalf("signed reads and candles from a given time go to the venue each time: %d calls", calls.Load())
 	}
 }

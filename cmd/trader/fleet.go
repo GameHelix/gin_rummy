@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/candylario/trader/internal/agent"
+	"github.com/candylario/trader/internal/binance"
 	"github.com/candylario/trader/internal/config"
 	"github.com/candylario/trader/internal/fleet"
 	"github.com/candylario/trader/internal/news"
@@ -109,7 +110,7 @@ func runFleet(ctx context.Context, args []string, out io.Writer, e env) error {
 	}
 	switch cmd {
 	case "serve":
-		return serve(ctx, svc, e, out)
+		return serve(ctx, svc, e, out, defaults)
 	case "import":
 		raw, err := os.ReadFile(*configPath)
 		if err != nil {
@@ -388,15 +389,21 @@ func (p *newsPool) source(urls []string) news.Source {
 	return p.caches[key]
 }
 
-func serve(ctx context.Context, svc *fleet.Service, e env, out io.Writer) error {
+func serve(ctx context.Context, svc *fleet.Service, e env, out io.Writer, defaults config.Config) error {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(out, "%s %s\n", time.Now().UTC().Format("2006-01-02 15:04:05Z"), fmt.Sprintf(format, args...))
 	}
 	pool := &newsPool{e: e, caches: map[string]*news.Cache{}}
+	// Agents on the same coins share candles, prices and rules: a reply
+	// serves every agent that asks within half a poll interval, so ten
+	// agents cost Binance little more than one.
+	market := &binance.Cache{TTL: time.Duration(defaults.PollSeconds) * time.Second / 2}
 	sup := &fleet.Supervisor{
 		Service: svc, Every: 30 * time.Second, Logf: logf,
 		Build: func(spec fleet.Spec) (*agent.Engine, error) {
-			return buildEngine(spec.Config, spec.Keys, e, pool.source(spec.Config.NewsFeeds), fleet.Prefixed(out, "["+spec.Name+"] ")), nil
+			eng := buildEngine(spec.Config, spec.Keys, e, pool.source(spec.Config.NewsFeeds), fleet.Prefixed(out, "["+spec.Name+"] "))
+			eng.Exchange.Cache = market
+			return eng, nil
 		},
 		Ship: func(ctx context.Context, spec fleet.Spec) {
 			who := pg.Agent{Tenant: spec.Tenant, ID: spec.Agent, Name: spec.Name, Mode: spec.Config.Mode}
