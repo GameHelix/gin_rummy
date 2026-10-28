@@ -20,6 +20,7 @@ import (
 
 	"github.com/candylario/trader/internal/agent"
 	"github.com/candylario/trader/internal/analyst"
+	"github.com/candylario/trader/internal/audit"
 	"github.com/candylario/trader/internal/binance"
 	"github.com/candylario/trader/internal/pg"
 	"github.com/candylario/trader/internal/testkit"
@@ -365,6 +366,123 @@ func TestClosingATenantStopsItsAgentsAndErasesItsKeys(t *testing.T) {
 	}
 	if b, _ := s.Store.Tenant(ctx, bob.ID); b.Status != "active" || b.Name != "bob@example.com" {
 		t.Fatalf("another tenant changed: %+v", b)
+	}
+}
+
+// clock is a fake clock tests move.
+type clock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *clock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
+
+func (c *clock) advance(d time.Duration) { c.mu.Lock(); c.at = c.at.Add(d); c.mu.Unlock() }
+
+func TestAPanicEndsOnlyThatAgentsRunAndTheFailureIsReported(t *testing.T) {
+	s := service(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clk := &clock{at: testkit.At(t, "2026-10-25 12:00")}
+	ex := testkit.NewBinance(clk.now)
+	api := &testkit.API{Script: []func(string) (int, any){testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, testkit.CitePrices)}}
+	exURL, apiURL := ex.Server(t).URL, api.Server(t).URL
+	tn, _, err := s.AddTenant(ctx, uuid.Nil, "alice", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant := tn.ID
+	model, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindAnthropic, Label: "main", Secret: []byte(`{"key":"sk"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]uuid.UUID{}
+	for _, name := range []string{"fine", "broken"} {
+		// An exchange key serves one agent only.
+		venue, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: name, Mode: "testnet", Secret: []byte(`{"key":"` + testkit.Key + `","secret":"` + testkit.Secret + `"}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: name, Mode: "testnet", Config: agentConfig(t, nil), Keys: []uuid.UUID{model.ID, venue.ID}, By: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Start(ctx, tenant, row.ID); err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = row.ID
+	}
+	var ships atomic.Int32
+	sup := &Supervisor{Service: s, Every: 20 * time.Millisecond, Logf: t.Logf, Now: clk.now,
+		Build: func(spec Spec) (*agent.Engine, error) {
+			if spec.Name == "broken" {
+				panic("boom")
+			}
+			return &agent.Engine{
+				Config:   spec.Config,
+				Exchange: &binance.Client{HTTP: http.DefaultClient, BaseURL: exURL, DataURL: exURL, Key: spec.Keys.BinanceKey, Secret: spec.Keys.BinanceSecret, Now: clk.now},
+				Analyst: &analyst.Analyst{Config: spec.Config, Client: anthropic.NewClient(option.WithAPIKey(spec.Keys.Anthropic), option.WithBaseURL(apiURL)),
+					Budget: &analyst.Budget{Path: filepath.Join(spec.Config.DataDir, "budget.json"), DailyUSD: spec.Config.MaxDailyLLMUSD, MonthlyUSD: spec.Config.MaxMonthlyLLMUSD, Now: clk.now},
+					Sleep:  func(context.Context, time.Duration) error { return nil }},
+				Now: clk.now,
+			}, nil
+		},
+		// The shipper panics too: the agent must trade on without it.
+		Ship: func(ctx context.Context, spec Spec) { ships.Add(1); panic("ship") },
+	}
+	done := make(chan struct{})
+	go func() { sup.Run(ctx); close(done) }()
+	wait := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(15 * time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal(what)
+			}
+		}
+	}
+	wait("the fine agent should trade despite the other's panic", func() bool { return len(ex.OrderList()) == 1 && sup.Running(tenant, ids["fine"]) })
+	wait("the broken agent's failure should be on record", func() bool { return len(sup.Down(0)) == 1 })
+	f := sup.Down(0)[0]
+	if f.Agent != ids["broken"] || f.Tenant != tenant || f.Runs != 1 || !strings.Contains(f.Error, "panic: boom") || !f.Since.Equal(clk.now()) {
+		t.Fatalf("failure %+v", f)
+	}
+	if len(sup.Down(10*time.Minute)) != 0 || ships.Load() != 1 {
+		t.Fatalf("a fresh failure is not yet reported, and the shipper ran once: %d ships", ships.Load())
+	}
+	// A minute later the agent is tried again; after ten, the health check reports it.
+	clk.advance(10 * time.Minute)
+	wait("the broken agent should be retried", func() bool { return sup.Down(0)[0].Runs == 2 })
+	if down := sup.Down(10 * time.Minute); len(down) != 1 || down[0].Agent != ids["broken"] {
+		t.Fatalf("after ten minutes the failure is reported: %+v", down)
+	}
+	if !sup.Running(tenant, ids["fine"]) {
+		t.Fatal("the fine agent runs on")
+	}
+	// Stopping the broken agent clears its failure.
+	if err := s.Stop(ctx, tenant, ids["broken"]); err != nil {
+		t.Fatal(err)
+	}
+	wait("a stopped agent is no failure", func() bool { return len(sup.Down(0)) == 0 })
+	// A shutdown stops the agent as the engine's own doing: on record, but
+	// not announced.
+	cancel()
+	<-done
+	events, err := audit.ReadAfter(filepath.Join(s.DataDir, "agents", ids["fine"].String(), "testnet", "events"), 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	for _, e := range events {
+		body := string(e.Body)
+		switch {
+		case e.Type == "agent.stopped" && strings.Contains(body, `"by":"shutdown"`):
+			stopped = true
+		case e.Type == "notice" && strings.Contains(body, "Stopped."):
+			t.Fatalf("a shutdown must not message the user: %s", body)
+		}
+	}
+	if !stopped {
+		t.Fatal("the shutdown must be on record as the engine's own stop")
 	}
 }
 

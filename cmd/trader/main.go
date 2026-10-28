@@ -232,11 +232,21 @@ func keysFromEnv() (fleet.Keys, error) {
 	return fleet.Keys{Anthropic: apiKey(), BinanceKey: os.Getenv("BINANCE_API_KEY"), BinanceSecret: os.Getenv("BINANCE_API_SECRET")}, nil
 }
 
+// commit is the source commit this binary was built from, set by the
+// Dockerfile with -ldflags "-X main.commit=...".
+var commit = "dev"
+
 // buildEngine wires an agent to Binance and the model with the given keys.
 func buildEngine(c config.Config, k fleet.Keys, e env, src news.Source, log io.Writer) *agent.Engine {
+	ex := exchange(c.Mode, k, e)
+	if log != nil {
+		ex.Logf = func(format string, args ...any) {
+			fmt.Fprintf(log, "%s %s\n", time.Now().UTC().Format("2006-01-02 15:04:05Z"), fmt.Sprintf(format, args...))
+		}
+	}
 	return &agent.Engine{
 		Config:   c,
-		Exchange: exchange(c.Mode, k, e),
+		Exchange: ex,
 		// One budget for testnet and live: both spend the same model key.
 		Analyst: &analyst.Analyst{Config: c, Client: modelClient(k.Anthropic, e), Log: log,
 			Budget: &analyst.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: e.Now}},

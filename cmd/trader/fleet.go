@@ -424,7 +424,7 @@ func startAPI(ctx context.Context, svc *fleet.Service, sup *fleet.Supervisor, e 
 	if err != nil {
 		return fmt.Errorf("engine API: %w", err)
 	}
-	srv := &server.Server{Fleet: svc, Agents: sup, Token: token, Logf: logf,
+	srv := &server.Server{Fleet: svc, Agents: sup, Token: token, Commit: commit, Logf: logf,
 		Report: func(ctx context.Context, spec fleet.Spec) (agent.Report, error) {
 			return buildEngine(spec.Config, fleet.Keys{}, e, nil, nil).Report(ctx)
 		}}

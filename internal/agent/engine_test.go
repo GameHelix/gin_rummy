@@ -1086,3 +1086,50 @@ func TestHoldsAreReviewedOnlyWhenTheyMissedAMove(t *testing.T) {
 		t.Fatalf("a hold through a 5%% move is reviewed: lessons %+v, %q", r.eng.mem.Lessons, r.notices())
 	}
 }
+
+func TestStopsByTheEngineStayQuietAndSoDoQuickRestarts(t *testing.T) {
+	r := newRig(t, rate("hold", "hold"))
+	r.command("stop") // no decisions while this test starts and stops the agent
+	run := func(e *Engine, cause error) {
+		t.Helper()
+		ctx, cancel := context.WithCancelCause(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- e.Run(ctx) }()
+		select {
+		case <-e.Started():
+		case err := <-done:
+			t.Fatalf("the run ended early: %v", err)
+		}
+		cancel(cause)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func(substr string) int {
+		n := 0
+		for _, m := range r.notices() {
+			if strings.Contains(m, substr) {
+				n++
+			}
+		}
+		return n
+	}
+	run(r.eng, ErrEngineStopping)
+	if count("Agent started") != 1 || r.sent("⏹ Stopped.") {
+		t.Fatalf("the first start is announced, a stop for a deploy is not: %q", r.notices())
+	}
+	r.advance(2 * time.Minute)
+	run(newEngine(t, r.eng.Config, r), ErrEngineStopping)
+	if count("Agent started") != 1 || r.sent("⏹ Stopped.") {
+		t.Fatalf("a deploy must not message the user: %q", r.notices())
+	}
+	r.advance(quietRestart + time.Minute)
+	run(newEngine(t, r.eng.Config, r), ErrRestarting)
+	if count("Agent started") != 2 || r.sent("⏹ Stopped.") {
+		t.Fatalf("down for longer than a deploy, the start is announced again: %q", r.notices())
+	}
+	run(newEngine(t, r.eng.Config, r), nil)
+	if count("Restarted on the new settings") != 1 || count("⏹ Stopped.") != 1 {
+		t.Fatalf("new settings are confirmed in a line, and a stop the user asked for is announced: %q", r.notices())
+	}
+}

@@ -54,7 +54,9 @@ type Engine struct {
 	alerted   map[string]time.Time
 	inbox     chan inbound
 	exit      chan struct{}
+	started   chan struct{}
 	mailOnce  sync.Once
+	startOnce sync.Once
 	later     []inbound
 	job       *job
 	results   chan result
@@ -90,13 +92,30 @@ type Reply struct {
 // commands.
 var ErrNotRunning = errors.New("the agent is not running")
 
+// The causes a supervisor gives when it cancels a run. A stop the engine
+// makes on its own, for a deploy or new settings, is not news to the user:
+// the agent records it without a message and starts again quietly when it
+// is back within minutes. Any other stop is announced.
+var (
+	ErrEngineStopping = errors.New("the engine is stopping")
+	ErrRestarting     = errors.New("the agent restarts on new settings")
+)
+
 // mailbox is where commands wait for the loop. It exists before the loop
 // starts, so commands can queue while the agent opens its account.
 func (e *Engine) mailbox() chan inbound {
 	e.mailOnce.Do(func() {
-		e.inbox, e.exit = make(chan inbound, 16), make(chan struct{})
+		e.inbox, e.exit, e.started = make(chan inbound, 16), make(chan struct{}), make(chan struct{})
 	})
 	return e.inbox
+}
+
+// Started is closed once a run has opened the account and entered its
+// loop, so a supervisor can tell a running agent from one that keeps
+// failing to start.
+func (e *Engine) Started() <-chan struct{} {
+	e.mailbox()
+	return e.started
 }
 
 // Command runs a command from the engine API in the agent's loop and
@@ -465,14 +484,14 @@ func (e *Engine) Run(ctx context.Context) error {
 	if err := e.open(ctx); err != nil {
 		return err
 	}
-	e.notify(ctx, e.startText())
+	e.announceStart(ctx)
+	e.startOnce.Do(func() { close(e.started) })
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			e.notify(ctx, "⏹ Stopped.")
-			e.emit(evAgentStopped, agentStopped{Cash: e.st.Ledger.Cash, Holdings: e.st.Ledger.Holdings, Halted: e.st.Halted})
+			e.stop(ctx)
 			return e.save()
 		case in := <-e.inbox:
 			e.handle(ctx, in)
@@ -487,6 +506,44 @@ func (e *Engine) Run(ctx context.Context) error {
 		e.handleLater(ctx)
 		e.saveOrAlert(ctx)
 	}
+}
+
+// quietRestart is how soon after a stop by the engine a start goes
+// unannounced: long enough for a deploy, short enough that a real outage
+// is still reported.
+const quietRestart = 5 * time.Minute
+
+// announceStart tells the user the agent runs. After a stop the engine made
+// itself minutes ago, for a deploy, only the log hears of it; after a
+// restart on new settings, one line confirms them.
+func (e *Engine) announceStart(ctx context.Context) {
+	by, at := e.st.StoppedBy, e.st.StoppedAt
+	e.st.StoppedBy, e.st.StoppedAt = "", time.Time{}
+	switch {
+	case by == stopShutdown && e.now().Sub(at) < quietRestart:
+		e.logf("running again after %s", e.now().Sub(at).Round(time.Second))
+	case by == stopRestart:
+		e.notify(ctx, "🔄 Restarted on the new settings.")
+	default:
+		e.notify(ctx, e.startText())
+	}
+}
+
+// stop records the end of the run. The user hears of it unless the engine
+// stopped the agent on its own; then the state remembers why, so the next
+// start knows whether to stay quiet.
+func (e *Engine) stop(ctx context.Context) {
+	by := ""
+	switch cause := context.Cause(ctx); {
+	case errors.Is(cause, ErrEngineStopping):
+		by = stopShutdown
+	case errors.Is(cause, ErrRestarting):
+		by = stopRestart
+	default:
+		e.notify(ctx, "⏹ Stopped.")
+	}
+	e.st.StoppedBy, e.st.StoppedAt = by, e.now()
+	e.emit(evAgentStopped, agentStopped{Cash: e.st.Ledger.Cash, Holdings: e.st.Ledger.Holdings, Halted: e.st.Halted, By: by})
 }
 
 // DecideOnce makes one decision now, for the command line.

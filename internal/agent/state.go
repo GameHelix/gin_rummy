@@ -139,6 +139,11 @@ type State struct {
 	Reviews     []int        `json:"review_queue,omitempty"`
 	ReviewAt    time.Time    `json:"review_retry_at,omitzero"`
 	ReviewTries int          `json:"review_tries,omitempty"`
+	// StoppedBy and StoppedAt remember a stop the engine made on its own,
+	// for a deploy (shutdown) or new settings (restart), so a quick start
+	// after it stays quiet. A stop the user asked for leaves them empty.
+	StoppedBy string    `json:"stopped_by,omitempty"`
+	StoppedAt time.Time `json:"stopped_at,omitzero"`
 	// TelegramOffset is from the agent's own bot, since removed; it stays so
 	// older state files still load, and is dropped on the next save.
 	TelegramOffset int64 `json:"telegram_offset,omitempty"`
@@ -153,6 +158,12 @@ const (
 )
 
 var haltRank = map[string]int{haltDaily: 1, haltKey: 2, haltMismatch: 2, haltDrawdown: 3, haltManual: 4}
+
+// Why the engine stopped an agent on its own.
+const (
+	stopShutdown = "shutdown"
+	stopRestart  = "restart"
+)
 
 func (st *State) Last() *Decision {
 	if len(st.Decisions) == 0 {

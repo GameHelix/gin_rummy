@@ -21,19 +21,26 @@ security:
 paths:
   /v1/health:
     get:
-      summary: Whether the engine and its database answer
+      summary: Whether the engine can work, for an uptime monitor
+      description: 200 when the database answers and every agent that should run does. 503 while the database is down, or while an agent has failed to run for ten minutes or more; such agents are listed.
       security: []
       responses:
         "200":
           description: Healthy
           content:
             application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+        "503":
+          description: Agents are down (a Health), or the database is (an error)
+          content:
+            application/json:
               schema:
-                type: object
-                required: [ok]
-                properties:
-                  ok: {type: boolean}
-        "503": {$ref: "#/components/responses/Error"}
+                oneOf:
+                  - $ref: "#/components/schemas/Health"
+                  - type: object
+                    required: [error]
+                    properties:
+                      error: {$ref: "#/components/schemas/Error"}
   /v1/openapi.yaml:
     get:
       summary: This document
@@ -375,10 +382,28 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthorized, not_found, conflict, not_running, no_account, refused, timeout, internal]
+          enum: [bad_request, unauthorized, forbidden, not_found, conflict, not_running, no_account, refused, timeout, internal]
         message:
           type: string
           description: Safe to show to the user for refused, not_running and no_account.
+    Health:
+      type: object
+      required: [ok, agents_down]
+      properties:
+        ok: {type: boolean}
+        commit: {type: string, description: The source commit the engine was built from, when known.}
+        agents_down:
+          type: array
+          description: Agents that should run but have failed for ten minutes or more.
+          items: {$ref: "#/components/schemas/AgentDown"}
+    AgentDown:
+      type: object
+      required: [tenant_id, agent_id, since, error]
+      properties:
+        tenant_id: {type: string, format: uuid}
+        agent_id: {type: string, format: uuid}
+        since: {type: string, format: date-time, description: When the agent first failed.}
+        error: {type: string, description: The last error; not meant for the user.}
     Plan:
       type: object
       description: What a tenant's subscription allows.

@@ -35,6 +35,9 @@ type rig struct {
 	t      *testing.T
 	ex     *testkit.Binance
 	client *api.Client
+	sup    *fleet.Supervisor
+	mu     sync.Mutex
+	clock  time.Time
 }
 
 // newRig runs an engine with its API against fake Binance and model
@@ -51,8 +54,9 @@ func newRig(t *testing.T) *rig {
 	}
 	master, _ := vault.NewMasterKey()
 	v, _ := vault.New(master)
-	now := func() time.Time { return testkit.At(t, "2026-10-25 12:00") }
-	r := &rig{t: t, ex: testkit.NewBinance(now)}
+	r := &rig{t: t, clock: testkit.At(t, "2026-10-25 12:00")}
+	now := r.now
+	r.ex = testkit.NewBinance(now)
 	model := &testkit.API{WantKey: "sk-alice", Script: []func(string) (int, any){testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, testkit.CitePrices)}}
 	exURL, modelURL := r.ex.Server(t).URL, model.Server(t).URL
 	svc := &fleet.Service{Store: store, Vault: v, DataDir: t.TempDir(), Model: "test-model",
@@ -71,13 +75,14 @@ func newRig(t *testing.T) *rig {
 				Budget: &analyst.Budget{Path: filepath.Join(c.DataDir, "budget.json"), DailyUSD: c.MaxDailyLLMUSD, MonthlyUSD: c.MaxMonthlyLLMUSD, Now: now}}}
 		return e
 	}
-	sup := &fleet.Supervisor{Service: svc, Every: 50 * time.Millisecond, Logf: t.Logf,
+	sup := &fleet.Supervisor{Service: svc, Every: 50 * time.Millisecond, Logf: t.Logf, Now: now,
 		Build: func(spec fleet.Spec) (*agent.Engine, error) { return build(spec), nil },
 		Ship: func(ctx context.Context, spec fleet.Spec) {
 			who := pg.Agent{Tenant: spec.Tenant, ID: spec.Agent, Name: spec.Name, Mode: spec.Config.Mode}
 			pg.Ship(ctx, store, agent.EventsDir(spec.Config), func() (pg.Agent, bool) { return who, true }, 50*time.Millisecond, t.Logf)
 		}}
-	srv := &Server{Fleet: svc, Agents: sup, Token: token, Logf: t.Logf,
+	r.sup = sup
+	srv := &Server{Fleet: svc, Agents: sup, Token: token, Commit: "test", Logf: t.Logf,
 		Report: func(ctx context.Context, spec fleet.Spec) (agent.Report, error) { return build(spec).Report(ctx) }}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -390,7 +395,7 @@ func TestTheSpecMatchesTheCode(t *testing.T) {
 		"NewKey": api.NewKey{}, "Key": api.Key{}, "KeyList": api.KeyList{}, "Revoked": api.Revoked{}, "NewAgent": api.NewAgent{},
 		"Agent": api.Agent{}, "AgentList": api.AgentList{}, "Config": api.Config{}, "Command": api.Command{}, "CommandResult": api.CommandResult{},
 		"Position": api.Position{}, "Rating": api.Rating{}, "Decision": api.Decision{}, "AISpend": api.AISpend{}, "Status": api.Status{},
-		"Event": api.Event{}, "EventList": api.EventList{}, "Error": api.Error{},
+		"Event": api.Event{}, "EventList": api.EventList{}, "Error": api.Error{}, "Health": api.Health{}, "AgentDown": api.AgentDown{},
 	}
 	for name, v := range types {
 		var want []string
@@ -456,4 +461,65 @@ func TestClosingATenantThroughTheAPI(t *testing.T) {
 	if _, err := c.CloseTenant(ctx, uuid.Must(uuid.NewV7()).String()); code(err) != "not_found" {
 		t.Fatalf("an unknown tenant: %v", err)
 	}
+}
+
+// now is the rig's clock; advance moves it.
+func (r *rig) now() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.clock }
+
+func (r *rig) advance(d time.Duration) { r.mu.Lock(); r.clock = r.clock.Add(d); r.mu.Unlock() }
+
+// health reads the engine's health check without a token.
+func (r *rig) health() (int, api.Health) {
+	r.t.Helper()
+	resp, err := http.Get(r.client.BaseURL + "/v1/health")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var h api.Health
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		r.t.Fatal(err)
+	}
+	return resp.StatusCode, h
+}
+
+func TestHealthReportsAnAgentThatCannotRun(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	tn, err := r.client.CreateTenant(ctx, api.NewTenant{Name: "alice", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ak, err := r.client.AddKey(ctx, tn.ID, api.NewKey{Kind: api.KindAnthropic, Secret: json.RawMessage(`{"key":"sk-alice"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A Binance key the venue rejects: the agent can never open its account.
+	bk, err := r.client.AddKey(ctx, tn.ID, api.NewKey{Kind: api.KindBinance, Mode: "testnet", Secret: json.RawMessage(`{"key":"wrong","secret":"wrong"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := r.client.CreateAgent(ctx, tn.ID, api.NewAgent{Name: "broken", Mode: "testnet", Config: agentConfig(t, nil), Keys: []string{ak.ID, bk.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.client.Start(ctx, tn.ID, ag.ID); err != nil {
+		t.Fatal(err)
+	}
+	if status, h := r.health(); status != http.StatusOK || !h.OK || h.Commit != "test" || len(h.Down) != 0 {
+		t.Fatalf("healthy at first: %d %+v", status, h)
+	}
+	r.waitFor("the agent to fail", func() bool { return len(r.sup.Down(0)) == 1 })
+	if status, h := r.health(); status != http.StatusOK || !h.OK {
+		t.Fatalf("a fresh failure is not reported yet: %d %+v", status, h)
+	}
+	r.advance(downFor)
+	status, h := r.health()
+	if status != http.StatusServiceUnavailable || h.OK || len(h.Down) != 1 || h.Down[0].AgentID != ag.ID || h.Down[0].TenantID != tn.ID || !strings.Contains(h.Down[0].Error, "Binance") || !h.Down[0].Since.Equal(r.now().Add(-downFor)) {
+		t.Fatalf("after ten minutes the agent is reported: %d %+v", status, h)
+	}
+	if _, err := r.client.Stop(ctx, tn.ID, ag.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.waitFor("health to recover once the agent is stopped", func() bool { status, _ := r.health(); return status == http.StatusOK })
 }

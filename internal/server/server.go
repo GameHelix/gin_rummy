@@ -38,6 +38,13 @@ type Server struct {
 	// Report values an agent that is not running from its saved account.
 	Report func(ctx context.Context, spec fleet.Spec) (agent.Report, error)
 	Token  string
+	// NotifierToken, when set, opens only what the notifier needs: a
+	// tenant's agents, an agent's status, its commands and its event
+	// stream. Every other route refuses it.
+	NotifierToken string
+	// Commit is the source commit the engine was built from, for the
+	// health check.
+	Commit string
 	Logf   func(format string, args ...any)
 
 	hub hub
@@ -236,13 +243,28 @@ func created(isNew bool) int {
 	return http.StatusOK
 }
 
+// downFor is how long an agent must have failed to run before the health
+// check reports it: long enough for a restart to settle, short enough
+// that an uptime monitor alerts the same quarter hour.
+const downFor = 10 * time.Minute
+
+// health answers 200 when the database answers and every agent that should
+// run does, and 503 otherwise, naming the agents that are down.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) (int, any, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	if err := s.Fleet.Store.Ping(ctx); err != nil {
 		return 0, nil, &apiError{http.StatusServiceUnavailable, "internal", "the database does not answer"}
 	}
-	return http.StatusOK, map[string]bool{"ok": true}, nil
+	out := api.Health{OK: true, Commit: s.Commit, Down: []api.AgentDown{}}
+	for _, f := range s.Agents.Down(downFor) {
+		out.Down = append(out.Down, api.AgentDown{TenantID: f.Tenant.String(), AgentID: f.Agent.String(), Since: f.Since.UTC(), Error: f.Error})
+	}
+	status := http.StatusOK
+	if len(out.Down) > 0 {
+		out.OK, status = false, http.StatusServiceUnavailable
+	}
+	return status, out, nil
 }
 
 func spec(w http.ResponseWriter, r *http.Request) {

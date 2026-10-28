@@ -16,6 +16,25 @@ import (
 //go:embed openapi.yaml
 var Spec []byte
 
+// Health says whether the engine can work: its database answers and every
+// agent that should run does. Down lists agents that have failed to run
+// for ten minutes or more; the engine answers 503 while any exist. Commit
+// is the source commit the engine was built from, when known.
+type Health struct {
+	OK     bool        `json:"ok"`
+	Commit string      `json:"commit,omitempty"`
+	Down   []AgentDown `json:"agents_down"`
+}
+
+// AgentDown is an agent that should run but keeps failing, with its last
+// error.
+type AgentDown struct {
+	TenantID string    `json:"tenant_id"`
+	AgentID  string    `json:"agent_id"`
+	Since    time.Time `json:"since"`
+	Error    string    `json:"error"`
+}
+
 // Plan is what a tenant's subscription allows. The app sets it; the engine
 // enforces it on every config, start and plan change.
 type Plan struct {

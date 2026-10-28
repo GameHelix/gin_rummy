@@ -51,10 +51,14 @@ type agentStarted struct {
 	Halted   string             `json:"halted,omitempty"`
 }
 
+// agentStopped ends a run. By says when the engine stopped the agent on
+// its own: shutdown for a deploy, restart for new settings; it is empty
+// when the user stopped it.
 type agentStopped struct {
 	Cash     num.Dec            `json:"cash"`
 	Holdings map[string]num.Dec `json:"holdings"`
 	Halted   string             `json:"halted,omitempty"`
+	By       string             `json:"by,omitempty"`
 }
 
 // notice is a message for the user, as the notifier delivers it. Alert
