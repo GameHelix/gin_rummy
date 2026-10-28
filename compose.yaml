@@ -16,7 +16,7 @@ services:
 
   trader:
     build: .
-    image: trader:local
+    image: ${IMAGE:-trader:local}
     command: ["serve"]
     env_file:
       - path: .env

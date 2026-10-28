@@ -38,10 +38,11 @@ trader agent list --tenant ID
 Any server prepared by [candylario/infra](https://github.com/candylario/infra), at any cloud or your own, runs the engine:
 
 ```sh
-./deploy.sh deploy@SERVER_IP   # builds for the server's CPU; ships the image, compose.yaml, config/ and the settings over SSH
+./deploy.sh deploy@SERVER_IP              # builds the pushed commit for the server's CPU; ships the image, compose.yaml, config/ and the settings over SSH
+./deploy.sh --rollback deploy@SERVER_IP   # runs the previous image again; no build
 ```
 
-The settings come from the central `../.env` through `../infra/env.sh` when infra sits next to this repo, else from `.env`. Data and the database stay on the server. Allow the server's IP on the Binance key. `./move.sh deploy@SERVER_IP` moves an engine running here to the server, database and data included, and stops it here.
+Only a clean, pushed tree deploys; the image is tagged with the commit, and `/v1/health` reports it. The last three images stay on the server for rollbacks. The settings come from the central `../.env` through `../infra/env.sh` when infra sits next to this repo, else from `.env`. Data and the database stay on the server. Allow the server's IP on the Binance key. `./move.sh deploy@SERVER_IP` moves an engine running here to the server, database and data included, and stops it here.
 
 ## Engine API
 
