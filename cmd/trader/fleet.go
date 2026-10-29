@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/candylario/trader/internal/binance"
 	"github.com/candylario/trader/internal/config"
 	"github.com/candylario/trader/internal/fleet"
+	"github.com/candylario/trader/internal/hyperliquid"
 	"github.com/candylario/trader/internal/news"
 	"github.com/candylario/trader/internal/pg"
 	"github.com/candylario/trader/internal/radar"
@@ -305,6 +307,18 @@ func openFleet(ctx context.Context, defaults config.Config, e env) (*fleet.Servi
 		return nil, nil, err
 	}
 	svc := &fleet.Service{Store: st, Vault: v, DataDir: defaults.DataDir, Model: defaults.Model, Check: checkSpec(e), CheckKey: checkKey(e, defaults.Model)}
+	svc.Exchange = func(mode string) *hyperliquid.Client {
+		url := hyperliquid.TestnetURL
+		if mode == fleet.ModeMainnet {
+			url = hyperliquid.MainnetURL
+		}
+		return &hyperliquid.Client{HTTP: e.HTTP, BaseURL: url, Now: e.Now}
+	}
+	fee, err := strconv.Atoi(cmp.Or(os.Getenv("HYPERLIQUID_BUILDER_FEE"), "0"))
+	if err != nil || fee < 0 || fee > 1000 {
+		return nil, nil, errors.New("HYPERLIQUID_BUILDER_FEE is the fee in tenths of a basis point, 0 to 1000")
+	}
+	svc.Builder = hyperliquid.Builder{Address: strings.ToLower(os.Getenv("HYPERLIQUID_BUILDER")), Fee: fee}
 	return svc, st.Close, nil
 }
 

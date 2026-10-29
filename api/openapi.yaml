@@ -323,6 +323,74 @@ paths:
             text/event-stream: {}
         "400": {$ref: "#/components/responses/Error"}
         "404": {$ref: "#/components/responses/Error"}
+  /v1/tenants/{tenant}/wallet:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+    post:
+      summary: Make the account's agent wallet on Hyperliquid
+      description: The engine makes an agent wallet and keeps its key sealed; the account's own wallet approves it with the approvals below. An account has one wallet; a second request returns it.
+      responses:
+        "201":
+          description: The wallet, made now
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Wallet"}
+        "200":
+          description: The wallet the account already had
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Wallet"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+    get:
+      summary: The wallet and, once approved, the account
+      responses:
+        "200":
+          description: The wallet; account is present once the agent is approved
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Wallet"}
+        "404": {$ref: "#/components/responses/Error"}
+  /v1/tenants/{tenant}/wallet/approvals:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+    get:
+      summary: What the account's wallet signs to approve the agent and the builder fee
+      description: Returns typed data for eth_signTypedData_v4. The wallet is made first if the account has none.
+      parameters:
+        - name: user
+          in: query
+          required: true
+          schema: {type: string, description: The account's address.}
+        - name: mode
+          in: query
+          required: true
+          schema: {type: string, enum: [testnet, mainnet]}
+      responses:
+        "200":
+          description: The approvals to sign
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WalletApprovals"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+    post:
+      summary: Submit the signed approvals
+      description: The engine relays only the actions it gave, confirms with the exchange that the agent acts for the account and that the builder fee is approved, then records the account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WalletApproval"}
+      responses:
+        "200":
+          description: The approved wallet
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Wallet"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
   /v1/radar/alerts:
     get:
       summary: The radar's latest alerts
@@ -418,6 +486,69 @@ components:
         application/json:
           schema: {$ref: "#/components/schemas/Config"}
   schemas:
+    Wallet:
+      type: object
+      required: [id, agent_address, agent_approved, builder_fee]
+      properties:
+        id: {type: string, format: uuid}
+        agent_address: {type: string, description: The agent wallet the engine holds.}
+        user: {type: string, description: The account it trades for, once approved.}
+        mode: {type: string, enum: [testnet, mainnet]}
+        agent_approved: {type: boolean}
+        builder_fee: {type: integer, description: The builder fee the account approved, in tenths of a basis point.}
+        account: {$ref: "#/components/schemas/WalletAccount"}
+    WalletAccount:
+      type: object
+      required: [value, withdrawable, positions]
+      properties:
+        value: {type: number, description: Equity in USDC.}
+        withdrawable: {type: number}
+        positions:
+          type: array
+          items: {$ref: "#/components/schemas/PerpPosition"}
+    PerpPosition:
+      type: object
+      required: [coin, size, entry_px, value, unrealized_pnl, liquidation_px, leverage, cross]
+      properties:
+        coin: {type: string}
+        size: {type: number, description: Negative when short.}
+        entry_px: {type: number}
+        value: {type: number}
+        unrealized_pnl: {type: number}
+        liquidation_px: {type: number}
+        leverage: {type: integer}
+        cross: {type: boolean}
+    WalletApprovals:
+      type: object
+      required: [user, mode, agent_address, approve_agent]
+      properties:
+        user: {type: string}
+        mode: {type: string, enum: [testnet, mainnet]}
+        agent_address: {type: string}
+        approve_agent: {type: object, description: "{action, nonce, typed_data}: sign typed_data, send action, nonce and the signature back."}
+        approve_builder_fee: {type: object, description: The same for the builder fee; absent when the engine charges none.}
+    Signature:
+      type: object
+      required: [r, s, v]
+      properties:
+        r: {type: string}
+        s: {type: string}
+        v: {type: integer}
+    SignedAction:
+      type: object
+      required: [action, nonce, signature]
+      properties:
+        action: {type: object, description: The action exactly as the engine gave it.}
+        nonce: {type: integer}
+        signature: {$ref: "#/components/schemas/Signature"}
+    WalletApproval:
+      type: object
+      required: [user, mode, approve_agent]
+      properties:
+        user: {type: string}
+        mode: {type: string, enum: [testnet, mainnet]}
+        approve_agent: {$ref: "#/components/schemas/SignedAction"}
+        approve_builder_fee: {$ref: "#/components/schemas/SignedAction"}
     RadarAlert:
       type: object
       description: One unusual move the radar raised. Changes are fractions; 0.05 is +5%.

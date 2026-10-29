@@ -389,3 +389,16 @@ func (s *Store) RewrapCredential(ctx context.Context, tenant, id uuid.UUID, seal
 		return err
 	})
 }
+
+// ResealCredential replaces a credential's secret with one sealed anew,
+// when what it holds has changed. A revoked credential is left alone.
+func (s *Store) ResealCredential(ctx context.Context, tenant, id uuid.UUID, sealed vault.Sealed) error {
+	return s.inTenant(ctx, tenant, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, "update credentials set ciphertext = $2, nonce = $3, wrapped_key = $4, key_nonce = $5, master_version = $6 where id = $1 and revoked_at is null",
+			id, sealed.Ciphertext, sealed.Nonce, sealed.WrappedKey, sealed.KeyNonce, sealed.MasterVersion)
+		if err == nil && tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return err
+	})
+}

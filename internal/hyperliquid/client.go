@@ -686,6 +686,13 @@ func (c *Client) Submit(ctx context.Context, a UserAction, sig Signature) error 
 	return err
 }
 
+// SubmitRaw sends an account action exactly as the account's wallet signed
+// it, when the action and signature arrive from a browser.
+func (c *Client) SubmitRaw(ctx context.Context, action json.RawMessage, nonce uint64, sig Signature) error {
+	_, err := c.submit(ctx, action, nonce, sig)
+	return err
+}
+
 // Sign signs a user action with a wallet the caller holds, for tests and
 // an operator's own account.
 func (a UserAction) Sign(s *Signer) (Signature, error) {

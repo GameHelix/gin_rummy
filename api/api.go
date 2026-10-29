@@ -289,3 +289,68 @@ type RadarAlert struct {
 type RadarAlertList struct {
 	Alerts []RadarAlert `json:"alerts"`
 }
+
+// Wallet is an account's agent wallet on Hyperliquid: made by the engine,
+// approved by the account's own wallet. Account is present once approved.
+type Wallet struct {
+	ID            string         `json:"id"`
+	AgentAddress  string         `json:"agent_address"`
+	User          string         `json:"user,omitempty"`
+	Mode          string         `json:"mode,omitempty"`
+	AgentApproved bool           `json:"agent_approved"`
+	BuilderFee    int            `json:"builder_fee"`
+	Account       *WalletAccount `json:"account,omitempty"`
+}
+
+// WalletAccount is the perpetuals account as the exchange sees it.
+type WalletAccount struct {
+	Value        float64        `json:"value"`
+	Withdrawable float64        `json:"withdrawable"`
+	Positions    []PerpPosition `json:"positions"`
+}
+
+// PerpPosition is an open perpetual position; Size is negative when short.
+type PerpPosition struct {
+	Coin          string  `json:"coin"`
+	Size          float64 `json:"size"`
+	EntryPx       float64 `json:"entry_px"`
+	Value         float64 `json:"value"`
+	UnrealizedPnl float64 `json:"unrealized_pnl"`
+	LiquidationPx float64 `json:"liquidation_px"`
+	Leverage      int     `json:"leverage"`
+	Cross         bool    `json:"cross"`
+}
+
+// WalletApprovals is what the account's wallet signs with
+// eth_signTypedData_v4: each holds the action, its nonce and the typed
+// data. The builder fee is absent when the engine charges none.
+type WalletApprovals struct {
+	User              string          `json:"user"`
+	Mode              string          `json:"mode"`
+	AgentAddress      string          `json:"agent_address"`
+	ApproveAgent      json.RawMessage `json:"approve_agent"`
+	ApproveBuilderFee json.RawMessage `json:"approve_builder_fee,omitempty"`
+}
+
+// Signature is an EIP-712 signature as a wallet returns it.
+type Signature struct {
+	R string `json:"r"`
+	S string `json:"s"`
+	V int    `json:"v"`
+}
+
+// SignedAction is an approval's action and nonce as the engine gave them,
+// with the account wallet's signature.
+type SignedAction struct {
+	Action    json.RawMessage `json:"action"`
+	Nonce     uint64          `json:"nonce"`
+	Signature Signature       `json:"signature"`
+}
+
+// WalletApproval submits the signed approvals for an account.
+type WalletApproval struct {
+	User              string        `json:"user"`
+	Mode              string        `json:"mode"`
+	ApproveAgent      SignedAction  `json:"approve_agent"`
+	ApproveBuilderFee *SignedAction `json:"approve_builder_fee,omitempty"`
+}

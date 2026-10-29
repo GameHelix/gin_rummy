@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/candylario/trader/internal/config"
+	"github.com/candylario/trader/internal/hyperliquid"
 	"github.com/candylario/trader/internal/pg"
 	"github.com/candylario/trader/internal/vault"
 )
@@ -118,6 +119,8 @@ func parseSecret(kind string, raw []byte) (secret, string, error) {
 		if s.Key == "" || s.Secret == "" {
 			return s, "", errors.New(`a Binance key is {"key": "...", "secret": "..."}`)
 		}
+	case KindHyperliquid:
+		return s, "", errors.New("a wallet is made by the engine: POST the tenant's /wallet")
 	default:
 		return s, "", fmt.Errorf("unknown key kind %q", kind)
 	}
@@ -134,6 +137,11 @@ type Service struct {
 	Model    string
 	Check    func(ctx context.Context, spec Spec) error
 	CheckKey func(ctx context.Context, kind, mode string, k Keys) error
+	// Exchange gives a Hyperliquid client for a wallet mode, testnet or
+	// mainnet; Builder is the engine's builder address and fee, in tenths
+	// of a basis point, that accounts approve.
+	Exchange func(mode string) *hyperliquid.Client
+	Builder  hyperliquid.Builder
 }
 
 // AddTenant creates a tenant, under the given ID or a new one. An ID that
