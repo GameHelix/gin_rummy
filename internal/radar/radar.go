@@ -34,6 +34,7 @@ type Alert struct {
 	Funding      float64   `json:"funding"` // the hourly rate
 	Score        float64   `json:"score"`
 	Reasons      []string  `json:"reasons"`
+	History      string    `json:"history"` // what followed moves like this on spot since 2017
 }
 
 // String is the alert as a chat shows it.
@@ -42,7 +43,11 @@ func (a Alert) String() string {
 	if a.Change15m < 0 {
 		arrow = "🔻"
 	}
-	return fmt.Sprintf("%s %s %s in 15m, %s in 1h, %s today · %s · %s", arrow, a.Coin, pct(a.Change15m), pct(a.Change1h), pct(a.Change24h), strings.Join(a.Reasons, ", "), money(a.Price))
+	s := fmt.Sprintf("%s %s %s in 15m, %s in 1h, %s today · %s · %s", arrow, a.Coin, pct(a.Change15m), pct(a.Change1h), pct(a.Change24h), strings.Join(a.Reasons, ", "), money(a.Price))
+	if a.History != "" {
+		s += "\n" + a.History
+	}
+	return s
 }
 
 func pct(x float64) string { return fmt.Sprintf("%+.1f%%", x*100) }
@@ -331,6 +336,7 @@ func (t *track) judge(now time.Time, coin string) (Alert, bool) {
 	}
 	a.Reasons = append(a.Reasons, "24h volume "+usd(a.Volume24hUSD))
 	a.Score = math.Abs(a.Sigma15m) + math.Abs(a.Change1h)/0.02 + math.Min(a.VolumeRate, 10)/2 + math.Abs(a.OIChange1h)*20
+	a.History = history(a)
 	return a, true
 }
 

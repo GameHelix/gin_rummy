@@ -284,6 +284,7 @@ type RadarAlert struct {
 	Score        float64   `json:"score"`
 	Reasons      []string  `json:"reasons"`
 	Text         string    `json:"text"`
+	History      string    `json:"history"`
 }
 
 type RadarAlertList struct {

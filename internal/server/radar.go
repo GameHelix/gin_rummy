@@ -18,7 +18,7 @@ func radarOut(e radar.Entry) api.RadarAlert {
 		reasons = []string{}
 	}
 	return api.RadarAlert{Seq: e.Seq, At: e.At, Coin: e.Coin, Price: e.Price, Change15m: e.Change15m, Change1h: e.Change1h, Change24h: e.Change24h,
-		Sigma15m: e.Sigma15m, VolumeRate: e.VolumeRate, Volume24hUSD: e.Volume24hUSD, OIChange1h: e.OIChange1h, Funding: e.Funding, Score: e.Score, Reasons: reasons, Text: e.String()}
+		Sigma15m: e.Sigma15m, VolumeRate: e.VolumeRate, Volume24hUSD: e.Volume24hUSD, OIChange1h: e.OIChange1h, Funding: e.Funding, Score: e.Score, Reasons: reasons, Text: e.String(), History: e.History}
 }
 
 func (s *Server) radarOn() error {
