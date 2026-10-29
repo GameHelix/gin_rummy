@@ -18,6 +18,9 @@ var afterMoveJSON []byte
 //go:embed history_crash.json
 var crashJSON []byte
 
+//go:embed history_funding.json
+var fundingJSON []byte
+
 type outcome struct {
 	N         int     `json:"n"`
 	Median4h  float64 `json:"median_4h"`
@@ -28,14 +31,66 @@ type outcome struct {
 
 var afterMove, crash map[string]outcome
 
+// fundingOutcome is what followed a funding payment of a given size on
+// Binance perpetuals: the coin's median move and share of gains a day
+// later. Keyed high (0.3%+ per 8h, longs pay) and very_negative (−0.2% or
+// less, shorts pay); the rest is ordinary.
+type fundingOutcome struct {
+	N         int     `json:"n"`
+	Median24h float64 `json:"median_24h"`
+	Up24h     float64 `json:"up_24h"`
+	Median72h float64 `json:"median_72h"`
+}
+
+var funding map[string]fundingOutcome
+
 func init() {
 	json.Unmarshal(afterMoveJSON, &afterMove)
 	json.Unmarshal(crashJSON, &crash)
+	json.Unmarshal(fundingJSON, &funding)
 }
 
-// historyOf words what followed moves like this one, or nothing when the
-// alert is not a 15-minute move of 3% or more.
+// Hourly funding rates that match the study's 8-hour extremes.
+const (
+	fundingHigh         = 0.003 / 8
+	fundingVeryNegative = -0.002 / 8
+)
+
+// fundingNote words what followed funding this extreme, or nothing.
+func fundingNote(hourly float64) string {
+	key, what := "", ""
+	switch {
+	case hourly >= fundingHigh:
+		key, what = "high", "Funding this high, longs paying"
+	case hourly <= fundingVeryNegative:
+		key, what = "very_negative", "Funding this negative, shorts paying"
+	default:
+		return ""
+	}
+	o, ok := funding[key]
+	if !ok || o.N < 50 {
+		return ""
+	}
+	return fmt.Sprintf("%s (perps, since 2020): 24h median %s, %.0f%% up; 72h %s.", what, pct(o.Median24h), o.Up24h*100, pct(o.Median72h))
+}
+
+// historyOf words what followed moves like this one and, when funding is
+// extreme, what followed that; nothing for a smaller move at ordinary
+// funding.
 func historyOf(a Alert) string {
+	move, note := moveHistory(a), fundingNote(a.Funding)
+	switch {
+	case move != "" && note != "":
+		return move + " " + note
+	case move != "":
+		return move
+	}
+	return note
+}
+
+// moveHistory words what followed 15-minute moves like this one, or
+// nothing when the move is under 3%.
+func moveHistory(a Alert) string {
 	m := math.Abs(a.Change15m)
 	if m < 0.03 {
 		return ""

@@ -77,6 +77,12 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 	if h := historyOf(Alert{Change15m: 0.02, VolumeRate: 9}); h != "" {
 		t.Fatalf("small move has history %q", h)
 	}
+	if h := historyOf(Alert{Change15m: 0.02, Funding: -0.0003}); !strings.HasPrefix(h, "Funding this negative") || !strings.Contains(h, "24h median") {
+		t.Fatalf("funding history %q", h)
+	}
+	if h := historyOf(Alert{Change15m: 0.06, VolumeRate: 3, Funding: 0.0005}); !strings.Contains(h, "such rises") || !strings.Contains(h, "Funding this high") {
+		t.Fatalf("move and funding history %q", h)
+	}
 	// Within the hour the coin stays quiet in the log however it moves.
 	for i := 0; i < 20; i++ {
 		coins["ETH"].mid *= 1.003
