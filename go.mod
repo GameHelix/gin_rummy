@@ -4,8 +4,10 @@ go 1.27
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.6
+	golang.org/x/crypto v0.40.0
 )
 
 require (
@@ -28,7 +30,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.33.0 // indirect
 	go.opentelemetry.io/otel/trace v1.33.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
-	golang.org/x/crypto v0.40.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
+	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.27.0 // indirect
 )
