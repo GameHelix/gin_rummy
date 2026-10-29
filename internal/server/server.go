@@ -725,6 +725,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) (int, any, error
 			return 0, nil, badRequest("limit must be between 1 and 1000")
 		}
 	}
+	var before int64
+	if v := r.URL.Query().Get("before"); v != "" {
+		if before, err = strconv.ParseInt(v, 10, 64); err != nil || before < 1 {
+			return 0, nil, badRequest("before must be a sequence number")
+		}
+	}
 	types, err := eventTypes(r.URL.Query().Get("type"))
 	if err != nil {
 		return 0, nil, err
@@ -732,7 +738,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) (int, any, error
 	if _, err := s.Fleet.Store.Agent(r.Context(), ids[0], ids[1]); err != nil {
 		return 0, nil, err
 	}
-	events, err := s.Fleet.Store.Events(r.Context(), ids[0], ids[1], from, limit, types)
+	var events []audit.Event
+	if before > 0 {
+		events, err = s.Fleet.Store.LastEvents(r.Context(), ids[0], ids[1], from, before, limit, types)
+	} else {
+		events, err = s.Fleet.Store.Events(r.Context(), ids[0], ids[1], from, limit, types)
+	}
 	out := api.EventList{Events: []api.Event{}}
 	for _, e := range events {
 		out.Events = append(out.Events, eventOut(e))

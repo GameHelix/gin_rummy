@@ -279,6 +279,12 @@ func TestTheAppRunsAnAgentThroughTheAPI(t *testing.T) {
 	if err != nil || len(page) != 3 || page[0].Seq != 3 || page[0].PrevHash == "" || page[0].Hash == "" {
 		t.Fatalf("events after 2: %+v %v", page, err)
 	}
+	req, _ := http.NewRequest(http.MethodGet, c.BaseURL+"/v1/tenants/"+tid+"/agents/"+aid+"/events?before=6&limit=2", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	var last api.EventList
+	if resp, err := http.DefaultClient.Do(req); err != nil || json.NewDecoder(resp.Body).Decode(&last) != nil || len(last.Events) != 2 || last.Events[0].Seq != 4 || last.Events[1].Seq != 5 {
+		t.Fatalf("the two events before 6: %+v %v", last, err)
+	}
 	var commands []string
 	for _, e := range events() {
 		var p struct{ Name, Source, Via string }
@@ -356,6 +362,11 @@ func TestBadRequestsGetClearErrors(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("unknown fields are refused: %v %v", resp.Status, err)
+	}
+	req, _ = http.NewRequest(http.MethodGet, c.BaseURL+"/v1/tenants/"+uuid.NewString()+"/agents/"+uuid.NewString()+"/events?before=0", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("before must be a sequence number: %v %v", resp.Status, err)
 	}
 	if resp, err := http.Get(c.BaseURL + "/v1/health"); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("health: %v", err)

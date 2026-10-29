@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,20 @@ func TestEventsReadBackInOrderAndAnnounceThemselves(t *testing.T) {
 	}
 	if other, _ := s.Events(ctx, uuid.New(), a.ID, 0, 10, nil); len(other) != 0 {
 		t.Fatal("another tenant must not read the events")
+	}
+	last, err := s.LastEvents(ctx, a.Tenant, a.ID, 0, 5, 2, nil)
+	if err != nil || len(last) != 2 || last[0].Seq != 3 || last[1].Seq != 4 {
+		t.Fatalf("the last two events before 5: %+v %v", last, err)
+	}
+	last, err = s.LastEvents(ctx, a.Tenant, a.ID, 3, math.MaxInt64, 100, []string{"decision.started"})
+	if err != nil || len(last) != len(written)-3 || last[0].Seq != 4 || last[len(last)-1].Seq != int64(len(written)) {
+		t.Fatalf("every event after 3, read from the end: %d events %v", len(last), err)
+	}
+	if none, err := s.LastEvents(ctx, a.Tenant, a.ID, 0, math.MaxInt64, 10, []string{"notice"}); err != nil || len(none) != 0 {
+		t.Fatalf("only the given types: %+v %v", none, err)
+	}
+	if other, _ := s.LastEvents(ctx, uuid.New(), a.ID, 0, math.MaxInt64, 10, nil); len(other) != 0 {
+		t.Fatal("another tenant must not read the events from the end either")
 	}
 	cancel()
 	if err := <-listening; err == nil {

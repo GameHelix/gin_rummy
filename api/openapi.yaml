@@ -280,6 +280,10 @@ paths:
       summary: An agent's audit log
       parameters:
         - $ref: "#/components/parameters/after"
+        - name: before
+          in: query
+          description: Only events with a lower seq. The page then holds the last `limit` of them, still in order, so the log reads backwards from any point; a before past the end, such as 9223372036854775807, gives the newest events.
+          schema: {type: integer, minimum: 1}
         - name: limit
           in: query
           schema: {type: integer, minimum: 1, maximum: 1000, default: 100}

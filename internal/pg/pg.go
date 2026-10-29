@@ -215,10 +215,24 @@ const eventsChannel = "agent_events"
 // Events returns up to limit of the agent's stored events after seq, in
 // order: all of them, or only those of the given types.
 func (s *Store) Events(ctx context.Context, tenant, agent uuid.UUID, after int64, limit int, types []string) ([]audit.Event, error) {
+	return s.events(ctx, tenant, agent, `select id, seq, type, at, body::text, prev_hash, hash from events
+		where agent_id = $1 and seq > $2 and ($4::text[] is null or type = any($4)) order by seq limit $3`, after, limit, types)
+}
+
+// LastEvents is Events read from the other end: up to limit of the
+// agent's stored events between after and before, the last of them, still
+// in order.
+func (s *Store) LastEvents(ctx context.Context, tenant, agent uuid.UUID, after, before int64, limit int, types []string) ([]audit.Event, error) {
+	return s.events(ctx, tenant, agent, `select * from (select id, seq, type, at, body::text, prev_hash, hash from events
+		where agent_id = $1 and seq > $2 and seq < $5 and ($4::text[] is null or type = any($4)) order by seq desc limit $3) newest order by seq`,
+		after, limit, types, before)
+}
+
+// events runs a query for an agent's events; the agent is its $1.
+func (s *Store) events(ctx context.Context, tenant, agent uuid.UUID, query string, args ...any) ([]audit.Event, error) {
 	var out []audit.Event
 	err := s.inTenant(ctx, tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `select id, seq, type, at, body::text, prev_hash, hash from events
-			where agent_id = $1 and seq > $2 and ($4::text[] is null or type = any($4)) order by seq limit $3`, agent, after, limit, types)
+		rows, err := tx.Query(ctx, query, append([]any{agent}, args...)...)
 		if err != nil {
 			return err
 		}
