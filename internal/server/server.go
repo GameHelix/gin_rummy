@@ -30,6 +30,7 @@ import (
 	"github.com/candylario/trader/internal/audit"
 	"github.com/candylario/trader/internal/fleet"
 	"github.com/candylario/trader/internal/pg"
+	"github.com/candylario/trader/internal/radar"
 )
 
 type Server struct {
@@ -46,6 +47,9 @@ type Server struct {
 	// health check.
 	Commit string
 	Logf   func(format string, args ...any)
+	// Radar, when set, is the radar's alert log, served to the notifier
+	// and the app.
+	Radar *radar.Log
 
 	hub hub
 }
@@ -115,6 +119,8 @@ func (s *Server) routes() []route {
 		{pattern: "POST /v1/tenants/{tenant}/agents/{agent}/commands", notifier: true, json: s.command},
 		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}/events", json: s.events},
 		{pattern: "GET /v1/tenants/{tenant}/agents/{agent}/events/stream", notifier: true, raw: s.stream},
+		{pattern: "GET /v1/radar/alerts", notifier: true, json: s.radarAlerts},
+		{pattern: "GET /v1/radar/stream", notifier: true, raw: s.radarStream},
 	}
 }
 

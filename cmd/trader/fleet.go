@@ -26,6 +26,7 @@ import (
 	"github.com/candylario/trader/internal/fleet"
 	"github.com/candylario/trader/internal/news"
 	"github.com/candylario/trader/internal/pg"
+	"github.com/candylario/trader/internal/radar"
 	"github.com/candylario/trader/internal/server"
 	"github.com/candylario/trader/internal/store"
 	"github.com/candylario/trader/internal/vault"
@@ -410,7 +411,7 @@ func serve(ctx context.Context, svc *fleet.Service, e env, out io.Writer, defaul
 			pg.Ship(ctx, svc.Store, agent.EventsDir(spec.Config), func() (pg.Agent, bool) { return who, true }, 2*time.Second, logf)
 		},
 	}
-	if err := startAPI(ctx, svc, sup, e, logf); err != nil {
+	if err := startAPI(ctx, svc, sup, startRadar(ctx, e, logf), e, logf); err != nil {
 		return err
 	}
 	logf("engine serving every active agent")
@@ -420,7 +421,7 @@ func serve(ctx context.Context, svc *fleet.Service, e env, out io.Writer, defaul
 // startAPI opens the engine API, for the app, when ENGINE_API_TOKEN is set.
 // ENGINE_NOTIFIER_TOKEN, when set, is a second token for the notifier that
 // opens only the routes it needs.
-func startAPI(ctx context.Context, svc *fleet.Service, sup *fleet.Supervisor, e env, logf func(string, ...any)) error {
+func startAPI(ctx context.Context, svc *fleet.Service, sup *fleet.Supervisor, rl *radar.Log, e env, logf func(string, ...any)) error {
 	token, notifier := os.Getenv("ENGINE_API_TOKEN"), os.Getenv("ENGINE_NOTIFIER_TOKEN")
 	if token == "" {
 		logf("engine API off; set ENGINE_API_TOKEN to open it")
@@ -436,7 +437,7 @@ func startAPI(ctx context.Context, svc *fleet.Service, sup *fleet.Supervisor, e 
 	if err != nil {
 		return fmt.Errorf("engine API: %w", err)
 	}
-	srv := &server.Server{Fleet: svc, Agents: sup, Token: token, NotifierToken: notifier, Commit: commit, Logf: logf,
+	srv := &server.Server{Fleet: svc, Agents: sup, Radar: rl, Token: token, NotifierToken: notifier, Commit: commit, Logf: logf,
 		Report: func(ctx context.Context, spec fleet.Spec) (agent.Report, error) {
 			return buildEngine(spec.Config, fleet.Keys{}, e, nil, nil).Report(ctx)
 		}}

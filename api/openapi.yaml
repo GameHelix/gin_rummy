@@ -323,6 +323,43 @@ paths:
             text/event-stream: {}
         "400": {$ref: "#/components/responses/Error"}
         "404": {$ref: "#/components/responses/Error"}
+  /v1/radar/alerts:
+    get:
+      summary: The radar's latest alerts
+      description: Unusual moves on every Hyperliquid perpetual, oldest first. Without `after`, the last `limit` alerts; with it, those numbered above that seq. The engine keeps the last thousand in memory.
+      parameters:
+        - $ref: "#/components/parameters/after"
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 500, default: 50}
+      responses:
+        "200":
+          description: The alerts
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RadarAlertList"}
+        "400": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /v1/radar/stream:
+    get:
+      summary: The radar's alerts as they are raised
+      description: |
+        Server-sent events. Each message has `id` (the seq), `event`
+        (`radar.alert`) and `data` (the RadarAlert as JSON). A comment line
+        arrives every 15 seconds when nothing else does. To resume,
+        reconnect with Last-Event-ID or `after`.
+      parameters:
+        - $ref: "#/components/parameters/after"
+        - name: Last-Event-ID
+          in: header
+          schema: {type: integer, minimum: 0}
+      responses:
+        "200":
+          description: The stream
+          content:
+            text/event-stream: {}
+        "400": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
 components:
   securitySchemes:
     token:
@@ -381,6 +418,35 @@ components:
         application/json:
           schema: {$ref: "#/components/schemas/Config"}
   schemas:
+    RadarAlert:
+      type: object
+      description: One unusual move the radar raised. Changes are fractions; 0.05 is +5%.
+      required: [seq, at, coin, price, change_15m, change_1h, change_24h, sigma_15m, volume_rate, volume_24h_usd, oi_change_1h, funding, score, reasons, text]
+      properties:
+        seq: {type: integer}
+        at: {type: string, format: date-time}
+        coin: {type: string, example: HYPE}
+        price: {type: number}
+        change_15m: {type: number}
+        change_1h: {type: number}
+        change_24h: {type: number}
+        sigma_15m: {type: number, description: The 15-minute move in units of the coin's own 15-minute volatility.}
+        volume_rate: {type: number, description: The last 15 minutes' volume against the day's 15-minute average.}
+        volume_24h_usd: {type: number}
+        oi_change_1h: {type: number}
+        funding: {type: number, description: The hourly funding rate.}
+        score: {type: number, description: Strength, for ordering.}
+        reasons:
+          type: array
+          items: {type: string}
+        text: {type: string, description: The alert as a chat shows it.}
+    RadarAlertList:
+      type: object
+      required: [alerts]
+      properties:
+        alerts:
+          type: array
+          items: {$ref: "#/components/schemas/RadarAlert"}
     Error:
       type: object
       required: [code, message]
