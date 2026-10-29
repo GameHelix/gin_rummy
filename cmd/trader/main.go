@@ -31,8 +31,13 @@ import (
 	"github.com/candylario/trader/internal/pg"
 )
 
-const usage = `trader — AI crypto trading agent for Binance spot
+const usage = `trader — the Candylario trading engine
 
+  trader radar            watch every Hyperliquid perpetual and print unusual
+                          moves as they happen; --json, --interval 30s,
+                          --testnet, --no-warmup; no keys needed
+
+Binance agent (ends at the tag before-hyperliquid):
   trader check            check keys, permissions, balances and news
   trader init             start the account with capital_usd from the config
   trader run              trade around the clock on its own, with keys from .env
@@ -98,6 +103,9 @@ func run(ctx context.Context, args []string, out io.Writer, e env) error {
 	}
 	if fleetCommands[args[0]] {
 		return runFleet(ctx, args, out, e)
+	}
+	if args[0] == "radar" {
+		return runRadar(ctx, args[1:], out, e)
 	}
 	cmd, rest := args[0], args[1:]
 	if cmd == "budget" {
