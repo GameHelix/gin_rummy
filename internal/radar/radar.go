@@ -34,7 +34,7 @@ type Alert struct {
 	Funding      float64   `json:"funding"` // the hourly rate
 	Score        float64   `json:"score"`
 	Reasons      []string  `json:"reasons"`
-	History      string    `json:"history"` // what followed moves like this on spot since 2017
+	History      string    `json:"history"` // what followed moves like this on perps since 2020
 }
 
 // String is the alert as a chat shows it.

@@ -7,9 +7,9 @@ import (
 	"math"
 )
 
-// What followed moves like an alert's on Binance spot from 2017 to 2026,
-// from the research repository: the coin's median return and the share of
-// gains for a buyer at the next bar, net of 0.3%, 4 hours and a day later.
+// What followed moves like an alert's on Binance USDT-M perpetuals from 2020
+// to 2026, from the research repository: the coin's median return and the share of
+// gains for a buyer at the next bar, net of 0.15%, 4 hours and a day later.
 // Keyed by direction, size and volume; crashes by what came before them.
 
 //go:embed history_after_move.json
@@ -52,7 +52,7 @@ func historyOf(a Alert) string {
 			key, what = "beaten", "a coin already down 20%+ in the day before"
 		}
 		if o, ok := crash[key]; ok {
-			return fmt.Sprintf("After %s such crashes of %s (spot, since 2017): 4h median %s, %.0f%% up; 24h %s, %.0f%% up.", count(o.N), what, pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
+			return fmt.Sprintf("After %s such crashes of %s (perps, since 2020): 4h median %s, %.0f%% up; 24h %s, %.0f%% up.", count(o.N), what, pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
 		}
 		return ""
 	}
@@ -80,7 +80,7 @@ func historyOf(a Alert) string {
 	if !ok || o.N < 50 {
 		return ""
 	}
-	return fmt.Sprintf("After %s such %s (spot, since 2017): 4h median %s, %.0f%% up; 24h %s, %.0f%% up.", count(o.N), what, pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
+	return fmt.Sprintf("After %s such %s (perps, since 2020): 4h median %s, %.0f%% up; 24h %s, %.0f%% up.", count(o.N), what, pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
 }
 
 func count(n int) string {
