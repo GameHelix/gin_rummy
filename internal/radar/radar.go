@@ -198,16 +198,24 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// An hourly line tells a quiet market from a stuck loop.
+	beat, samples, raised := w.now(), 0, 0
 	for {
 		assets, markets, err := w.Source.Markets(ctx)
 		if err != nil {
 			w.logf("markets: %v", err)
 		} else {
-			for _, a := range w.Observe(w.now(), assets, markets) {
+			alerts := w.Observe(w.now(), assets, markets)
+			samples, raised = samples+1, raised+len(alerts)
+			for _, a := range alerts {
 				if w.Alert != nil {
 					w.Alert(a)
 				}
 			}
+		}
+		if now := w.now(); now.Sub(beat) >= time.Hour {
+			w.logf("radar: %d samples of %d coins and %d alerts in the last hour", samples, len(w.coins), raised)
+			beat, samples, raised = now, 0, 0
 		}
 		select {
 		case <-ctx.Done():
