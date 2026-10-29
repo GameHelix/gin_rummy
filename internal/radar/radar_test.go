@@ -71,10 +71,10 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 	if !strings.HasPrefix(a.History, "After ") || !strings.Contains(a.History, "such rises") || !strings.Contains(a.String(), "\n"+a.History) {
 		t.Fatalf("history %q", a.History)
 	}
-	if h := history(Alert{Change15m: -0.12, Change24h: 0.6, VolumeRate: 3}); !strings.Contains(h, "risen 50%+") {
+	if h := historyOf(Alert{Change15m: -0.12, Change24h: 0.6, VolumeRate: 3}); !strings.Contains(h, "risen 50%+") {
 		t.Fatalf("crash history %q", h)
 	}
-	if h := history(Alert{Change15m: 0.02, VolumeRate: 9}); h != "" {
+	if h := historyOf(Alert{Change15m: 0.02, VolumeRate: 9}); h != "" {
 		t.Fatalf("small move has history %q", h)
 	}
 	// Within the hour the coin stays quiet in the log however it moves.

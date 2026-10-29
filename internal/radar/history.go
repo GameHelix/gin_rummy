@@ -33,9 +33,9 @@ func init() {
 	json.Unmarshal(crashJSON, &crash)
 }
 
-// history words what followed moves like this one, or nothing when the
+// historyOf words what followed moves like this one, or nothing when the
 // alert is not a 15-minute move of 3% or more.
-func history(a Alert) string {
+func historyOf(a Alert) string {
 	m := math.Abs(a.Change15m)
 	if m < 0.03 {
 		return ""

@@ -336,7 +336,7 @@ func (t *track) judge(now time.Time, coin string) (Alert, bool) {
 	}
 	a.Reasons = append(a.Reasons, "24h volume "+usd(a.Volume24hUSD))
 	a.Score = math.Abs(a.Sigma15m) + math.Abs(a.Change1h)/0.02 + math.Min(a.VolumeRate, 10)/2 + math.Abs(a.OIChange1h)*20
-	a.History = history(a)
+	a.History = historyOf(a)
 	return a, true
 }
 
