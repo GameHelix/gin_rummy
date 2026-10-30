@@ -287,6 +287,33 @@ type RadarAlert struct {
 	Text         string           `json:"text"`
 	History      string           `json:"history"`
 	Suggestion   *TradeSuggestion `json:"suggestion,omitempty"`
+	Momentum     *Momentum        `json:"momentum,omitempty"`
+}
+
+// Momentum is the read of a five-green-candle run: the score, its parts
+// and the verdict. Present on momentum-run alerts only.
+type Momentum struct {
+	Run          float64 `json:"run"`
+	Score        int     `json:"score"`
+	Class        string  `json:"class"`
+	Inflow       string  `json:"inflow"`
+	VolumeRate   float64 `json:"volume_rate"`
+	VolumeRising bool    `json:"volume_rising"`
+	BookBids     float64 `json:"book_bids"`
+	OIChange     float64 `json:"oi_change"`
+	Funding      float64 `json:"funding"`
+	BTC1h        float64 `json:"btc_1h"`
+	BTC4h        float64 `json:"btc_4h"`
+	BTC          string  `json:"btc"`
+	Resistance   float64 `json:"resistance"`
+	Support      float64 `json:"support"`
+	Extended     float64 `json:"extended"`
+	RSI          float64 `json:"rsi"`
+	Move         string  `json:"move"`
+	Sustain      string  `json:"sustainability"`
+	Pullback     string  `json:"pullback_risk"`
+	FreshMoney   string  `json:"fresh_money"`
+	Verdict      string  `json:"verdict"`
 }
 
 // TradeSuggestion is the trade the history argues for on an alert, with

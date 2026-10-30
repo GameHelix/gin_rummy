@@ -460,6 +460,30 @@ func (c *Client) OrderStatus(ctx context.Context, user string, oid int64, cloid 
 	return OrderState{Status: raw.Order.Status, Order: raw.Order.Order.order(), At: time.UnixMilli(raw.Order.StatusTimestamp).UTC()}, true, nil
 }
 
+// Book returns the notional resting on each side of coin's order book
+// over its top levels, in USDC.
+func (c *Client) Book(ctx context.Context, coin string) (bids, asks float64, err error) {
+	var raw struct {
+		Levels [][]struct {
+			Px num `json:"px"`
+			Sz num `json:"sz"`
+		} `json:"levels"`
+	}
+	if err := c.info(ctx, map[string]string{"type": "l2Book", "coin": coin}, &raw); err != nil {
+		return 0, 0, err
+	}
+	if len(raw.Levels) != 2 {
+		return 0, 0, errors.New("l2Book: unexpected reply")
+	}
+	for _, l := range raw.Levels[0] {
+		bids += float64(l.Px) * float64(l.Sz)
+	}
+	for _, l := range raw.Levels[1] {
+		asks += float64(l.Px) * float64(l.Sz)
+	}
+	return bids, asks, nil
+}
+
 // MaxBuilderFee is the rate user has approved for builder, in tenths of a
 // basis point; 0 means no approval.
 func (c *Client) MaxBuilderFee(ctx context.Context, user, builder string) (int, error) {

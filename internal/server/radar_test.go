@@ -35,7 +35,7 @@ func TestTheRadarIsListedAndStreamed(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("alerts: %d %v", resp.StatusCode, err)
 	}
-	if len(list.Alerts) != 1 || list.Alerts[0].Seq != 1 || list.Alerts[0].Coin != "HYPE" || !strings.HasPrefix(list.Alerts[0].Text, "🚀 big move · HYPE +5.2% in 15m") || list.Alerts[0].Rule != "big move" {
+	if len(list.Alerts) != 1 || list.Alerts[0].Seq != 1 || list.Alerts[0].Coin != "HYPE" || !strings.HasPrefix(list.Alerts[0].Text, "⚡ BIG MOVE — HYPE") || list.Alerts[0].Rule != "big move" {
 		t.Fatalf("alerts %+v", list.Alerts)
 	}
 	if resp := get("/v1/radar/alerts?after=1", token); resp.StatusCode != http.StatusOK {
@@ -72,7 +72,7 @@ func TestTheRadarIsListedAndStreamed(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		rl.Add(radar.Alert{Coin: "SOL", Change15m: -0.04, Reasons: []string{"open interest -12.0% in 1h"}})
 	}()
-	if id, data := next(); id != "2" || !strings.Contains(data, `"coin":"SOL"`) || !strings.Contains(data, `🔻 SOL`) {
+	if id, data := next(); id != "2" || !strings.Contains(data, `"coin":"SOL"`) || !strings.Contains(data, `🔻 MOVE — SOL`) {
 		t.Fatalf("second event %s %s", id, data)
 	}
 

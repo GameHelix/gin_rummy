@@ -42,6 +42,7 @@ func runRadar(ctx context.Context, args []string, out io.Writer, e env) error {
 	enc := json.NewEncoder(out)
 	w := &radar.Watcher{
 		Source:   client,
+		Books:    client,
 		Interval: *interval,
 		Now:      e.Now,
 		Logf:     func(format string, a ...any) { fmt.Fprintf(out, format+"\n", a...) },
@@ -79,7 +80,7 @@ func quiet(err error) error {
 func startRadar(ctx context.Context, e env, logf func(string, ...any)) *radar.Log {
 	client := &hyperliquid.Client{HTTP: e.HTTP, BaseURL: cmp.Or(os.Getenv("HYPERLIQUID_URL"), hyperliquid.MainnetURL), Now: e.Now}
 	rl := &radar.Log{}
-	w := &radar.Watcher{Source: client, Now: e.Now, Logf: logf, Alert: func(a radar.Alert) {
+	w := &radar.Watcher{Source: client, Books: client, Now: e.Now, Logf: logf, Alert: func(a radar.Alert) {
 		rl.Add(a)
 		logf("radar: %s", a)
 	}}

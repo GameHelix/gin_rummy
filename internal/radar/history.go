@@ -103,7 +103,7 @@ func triggerHistory(a Alert) string {
 	if !ok || o.N < 50 {
 		return ""
 	}
-	return fmt.Sprintf("After %s such alerts (perps, 2021–2026): 4h median %s, %.0f%% up; 24h %s, %.0f%% up.", count(o.N), pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
+	return fmt.Sprintf("%s such alerts since 2021 → 4h %s (%.0f%% up) · 24h %s (%.0f%% up)", count(o.N), pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
 }
 
 // Hourly funding rates that match the study's 8-hour extremes.
@@ -127,7 +127,7 @@ func fundingNote(hourly float64) string {
 	if !ok || o.N < 50 {
 		return ""
 	}
-	return fmt.Sprintf("%s (perps, since 2020): 24h median %s, %.0f%% up; 72h %s.", what, pct(o.Median24h), o.Up24h*100, pct(o.Median72h))
+	return fmt.Sprintf("%s → 24h %s (%.0f%% up) · 72h %s", what, pct(o.Median24h), o.Up24h*100, pct(o.Median72h))
 }
 
 // historyOf words what followed moves like this one and, when funding is
@@ -143,7 +143,7 @@ func historyOf(a Alert) string {
 	}
 	switch {
 	case move != "" && note != "":
-		return move + " " + note
+		return move + " · " + note
 	case move != "":
 		return move
 	}
@@ -169,7 +169,7 @@ func moveHistory(a Alert) string {
 			key, what = "beaten", "a coin already down 20%+ in the day before"
 		}
 		if o, ok := crash[key]; ok {
-			return fmt.Sprintf("After %s such crashes of %s (perps, since 2020): 4h median %s, %.0f%% up; 24h %s, %.0f%% up.", count(o.N), what, pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
+			return fmt.Sprintf("%s such crashes of %s since 2020 → 4h %s (%.0f%% up) · 24h %s (%.0f%% up)", count(o.N), what, pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
 		}
 		return ""
 	}
@@ -197,7 +197,7 @@ func moveHistory(a Alert) string {
 	if !ok || o.N < 50 {
 		return ""
 	}
-	return fmt.Sprintf("After %s such %s (perps, since 2020): 4h median %s, %.0f%% up; 24h %s, %.0f%% up.", count(o.N), what, pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
+	return fmt.Sprintf("%s such %s since 2020 → 4h %s (%.0f%% up) · 24h %s (%.0f%% up)", count(o.N), what, pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
 }
 
 func count(n int) string {

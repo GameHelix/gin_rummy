@@ -31,7 +31,7 @@ func TestACrashIsJudgedByWhatCameBefore(t *testing.T) {
 	pumped := &track{}
 	now := series(pumped, start, crash, 100/1.6, 0)
 	a, ok := pumped.judge(now, "X")
-	if !ok || a.Rule != RulePumpAndCrash || a.Suggestion.Side != "short" || a.Suggestion.StopLossPct != 0.10 || !strings.Contains(a.History, "such alerts") || !strings.Contains(a.String(), "🔻 pump-and-crash · X") {
+	if !ok || a.Rule != RulePumpAndCrash || a.Suggestion.Side != "short" || a.Suggestion.StopLossPct != 0.10 || !strings.Contains(a.History, "such alerts") || !strings.Contains(a.String(), "💥 PUMP-AND-CRASH — X") {
 		t.Fatalf("%+v", a)
 	}
 	beaten := &track{}

@@ -37,26 +37,48 @@ type Alert struct {
 	Reasons      []string   `json:"reasons"`
 	History      string     `json:"history"` // what followed moves like this on perps since 2020
 	Suggestion   Suggestion `json:"suggestion"`
+	Momentum     *Momentum  `json:"momentum,omitempty"` // for a momentum run
 }
 
-// String is the alert as a chat shows it.
+// emoji marks each rule in the chat.
+var emoji = map[string]string{
+	RulePumpAndCrash: "💥", RuleUnpumpedCrash: "🩹", RuleCrowdedRise: "🫂", RuleSpikeRejected: "🪃",
+	RuleBigMove: "⚡", RuleBigHour: "⏱", RuleOISwing: "🎢", RuleFundingFlip: "🔁", RuleMomentum: "🚨",
+}
+
+// String is the alert as a chat shows it: a card, one line per thing.
 func (a Alert) String() string {
-	arrow := "🚀"
+	if a.Momentum != nil {
+		return a.momentumCard()
+	}
+	mark, trend := emoji[a.Rule], "📈"
+	if mark == "" {
+		mark = "🚀"
+		if a.Change15m < 0 {
+			mark = "🔻"
+		}
+	}
 	if a.Change15m < 0 {
-		arrow = "🔻"
+		trend = "📉"
 	}
-	head := arrow + " " + a.Coin
-	if a.Rule != "" {
-		head = arrow + " " + a.Rule + " · " + a.Coin
+	name := strings.ToUpper(a.Rule)
+	if name == "" {
+		name = "MOVE"
 	}
-	s := fmt.Sprintf("%s %s in 15m, %s in 1h, %s today · %s · %s", head, pct(a.Change15m), pct(a.Change1h), pct(a.Change24h), strings.Join(a.Reasons, ", "), money(a.Price))
+	lines := []string{
+		fmt.Sprintf("%s %s — %s  %s", mark, name, a.Coin, money(a.Price)),
+		fmt.Sprintf("%s 15m %s · 1h %s · 24h %s", trend, pct(a.Change15m), pct(a.Change1h), pct(a.Change24h)),
+	}
+	if len(a.Reasons) > 0 {
+		lines = append(lines, "🔎 "+strings.Join(a.Reasons, " · "))
+	}
 	if a.History != "" {
-		s += "\n" + a.History
+		lines = append(lines, "📚 "+a.History)
 	}
 	if t := a.Suggestion.String(); t != "" {
-		s += "\n" + t
+		lines = append(lines, t)
 	}
-	return s
+	return strings.Join(lines, "\n")
 }
 
 func pct(x float64) string { return fmt.Sprintf("%+.1f%%", x*100) }
@@ -88,6 +110,7 @@ func usd(x float64) string {
 // at least $1M traded in the day.
 type Watcher struct {
 	Source       Source
+	Books        Books // optional: the order book read for momentum runs
 	Interval     time.Duration
 	Cooldown     time.Duration
 	MinVolumeUSD float64
@@ -111,6 +134,8 @@ type track struct {
 	samples        []sample // oldest first, at most a day
 	lastAlert      time.Time
 	fundingAlertAt time.Time
+	lastCandle     time.Time // the last 15-minute close judged for a momentum run
+	momentumAt     time.Time
 	seeded         bool // from candles, until the first live sample
 }
 
@@ -268,7 +293,9 @@ func (w *Watcher) Observe(now time.Time, assets []hyperliquid.Asset, markets []h
 		if m.DayVolumeUSD < minVol {
 			continue
 		}
-		if now.Sub(tr.lastAlert) >= cooldown {
+		if al, ok := w.momentum(now, a.Name, tr); ok {
+			alerts = append(alerts, al)
+		} else if now.Sub(tr.lastAlert) >= cooldown {
 			if al, ok := tr.judge(now, a.Name); ok {
 				tr.lastAlert = now
 				alerts = append(alerts, al)

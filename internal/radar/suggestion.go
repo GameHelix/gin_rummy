@@ -1,6 +1,9 @@
 package radar
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Suggestion is the trade the history argues for on an alert, with the
 // stop that history says it needs. Empty when the record says stay out.
@@ -15,7 +18,7 @@ func (s Suggestion) String() string {
 	if s.Side == "" {
 		return ""
 	}
-	return fmt.Sprintf("💡 %s with a %.0f%% stop: %s", s.Side, s.StopLossPct*100, s.Reason)
+	return fmt.Sprintf("💡 %s · stop %.0f%% — %s", strings.ToUpper(s.Side), s.StopLossPct*100, s.Reason)
 }
 
 // suggest applies what the studies found. Rises on volume have faded, so

@@ -65,10 +65,10 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 		t.Fatalf("alerts %+v", alerts)
 	}
 	a := alerts[0]
-	if a.Change15m < 0.03 || a.VolumeRate < 2 || a.Sigma15m < 3 || !strings.Contains(a.String(), "the usual volume") || !strings.Contains(a.String(), "🚀 big move · ETH") || !strings.Contains(a.History, "such alerts") {
+	if a.Change15m < 0.03 || a.VolumeRate < 2 || a.Sigma15m < 3 || !strings.Contains(a.String(), "the usual volume") || !strings.Contains(a.String(), "⚡ BIG MOVE — ETH") || !strings.Contains(a.History, "such alerts") {
 		t.Fatalf("alert %s (%+v)", a, a)
 	}
-	if !strings.HasPrefix(a.History, "After ") || !strings.Contains(a.History, "such alerts") || !strings.Contains(a.String(), "\n"+a.History) {
+	if !strings.Contains(a.History, "such alerts") || !strings.Contains(a.String(), "📚 "+a.History) {
 		t.Fatalf("history %q", a.History)
 	}
 	if h := historyOf(Alert{Change15m: -0.12, Change24h: 0.6, VolumeRate: 3}); !strings.Contains(h, "risen 50%+") {
@@ -77,10 +77,10 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 	if h := historyOf(Alert{Change15m: 0.02, VolumeRate: 9}); h != "" {
 		t.Fatalf("small move has history %q", h)
 	}
-	if h := historyOf(Alert{Change15m: 0.02, Funding: -0.0003}); !strings.HasPrefix(h, "Funding this negative") || !strings.Contains(h, "24h median") {
+	if h := historyOf(Alert{Change15m: 0.02, Funding: -0.0003}); !strings.HasPrefix(h, "Funding this negative") || !strings.Contains(h, "24h ") {
 		t.Fatalf("funding history %q", h)
 	}
-	if a.Suggestion.Side != "short" || a.Suggestion.StopLossPct != 0.08 || !strings.Contains(a.String(), "💡 short with a 8% stop") {
+	if a.Suggestion.Side != "short" || a.Suggestion.StopLossPct != 0.08 || !strings.Contains(a.String(), "💡 SHORT · stop 8%") {
 		t.Fatalf("suggestion %+v in %q", a.Suggestion, a.String())
 	}
 	for _, c := range []struct {

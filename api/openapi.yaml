@@ -654,6 +654,7 @@ components:
         text: {type: string, description: The alert as a chat shows it, history included.}
         history: {type: string, description: What followed moves like this on Binance perpetuals since 2020; empty when the move is under 3% in 15 minutes.}
         suggestion: {$ref: "#/components/schemas/TradeSuggestion"}
+        momentum: {$ref: "#/components/schemas/Momentum"}
     TradeSuggestion:
       type: object
       description: The trade the history argues for on an alert, with the stop it needs; absent when the record says stay out.
@@ -662,6 +663,32 @@ components:
         side: {type: string, enum: [long, short]}
         stop_loss_pct: {type: number}
         reason: {type: string}
+    Momentum:
+      type: object
+      description: The read of a five-green-candle run; present on momentum-run alerts only.
+      required: [run, score, class, inflow, volume_rate, volume_rising, book_bids, oi_change, funding, btc_1h, btc_4h, btc, resistance, support, extended, rsi, move, sustainability, pullback_risk, fresh_money, verdict]
+      properties:
+        run: {type: number, description: The five candles' rise, as a fraction.}
+        score: {type: integer, minimum: 0, maximum: 100}
+        class: {type: string, enum: [STRONG LONG, WATCHLIST]}
+        inflow: {type: string, enum: [strong, moderate, weak]}
+        volume_rate: {type: number}
+        volume_rising: {type: boolean}
+        book_bids: {type: number, description: Share of the top of the book on the bid side; 0 when unknown.}
+        oi_change: {type: number}
+        funding: {type: number}
+        btc_1h: {type: number}
+        btc_4h: {type: number}
+        btc: {type: string, enum: [bullish, neutral, bearish]}
+        resistance: {type: number}
+        support: {type: number}
+        extended: {type: number, description: Above the day's average price, as a fraction.}
+        rsi: {type: number}
+        move: {type: string}
+        sustainability: {type: string}
+        pullback_risk: {type: string}
+        fresh_money: {type: string}
+        verdict: {type: string}
     RadarAlertList:
       type: object
       required: [alerts]
