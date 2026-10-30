@@ -412,6 +412,7 @@ func TestTheSpecMatchesTheCode(t *testing.T) {
 		"Event": api.Event{}, "EventList": api.EventList{}, "Error": api.Error{}, "Health": api.Health{}, "AgentDown": api.AgentDown{},
 		"RadarAlert": api.RadarAlert{}, "RadarAlertList": api.RadarAlertList{}, "Wallet": api.Wallet{}, "WalletAccount": api.WalletAccount{},
 		"PerpPosition": api.PerpPosition{}, "WalletApprovals": api.WalletApprovals{}, "Signature": api.Signature{}, "SignedAction": api.SignedAction{}, "WalletApproval": api.WalletApproval{},
+		"NewTrade": api.NewTrade{}, "Trade": api.Trade{}, "CloseTrade": api.CloseTrade{}, "ClosedTrade": api.ClosedTrade{},
 	}
 	for name, v := range types {
 		var want []string

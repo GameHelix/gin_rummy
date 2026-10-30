@@ -355,3 +355,46 @@ type WalletApproval struct {
 	ApproveAgent      SignedAction  `json:"approve_agent"`
 	ApproveBuilderFee *SignedAction `json:"approve_builder_fee,omitempty"`
 }
+
+// NewTrade opens a position: a market order with its stop-loss, and a
+// take-profit when given, placed together. USD is the position's size;
+// the stop and take-profit are fractions of the entry price.
+type NewTrade struct {
+	Coin          string  `json:"coin"`
+	Side          string  `json:"side"`
+	USD           float64 `json:"usd"`
+	Leverage      int     `json:"leverage"`
+	StopLossPct   float64 `json:"stop_loss_pct"`
+	TakeProfitPct float64 `json:"take_profit_pct,omitempty"`
+	SlippagePct   float64 `json:"slippage_pct,omitempty"`
+}
+
+// Trade is an opened position with its orders on the exchange.
+type Trade struct {
+	Coin          string  `json:"coin"`
+	Side          string  `json:"side"`
+	Size          float64 `json:"size"`
+	EntryPx       float64 `json:"entry_px"`
+	USD           float64 `json:"usd"`
+	Leverage      int     `json:"leverage"`
+	OID           int64   `json:"oid"`
+	StopPx        float64 `json:"stop_px"`
+	StopOID       int64   `json:"stop_oid"`
+	TakeProfitPx  float64 `json:"take_profit_px,omitempty"`
+	TakeProfitOID int64   `json:"take_profit_oid,omitempty"`
+}
+
+// CloseTrade closes the position in a coin.
+type CloseTrade struct {
+	Coin        string  `json:"coin"`
+	SlippagePct float64 `json:"slippage_pct,omitempty"`
+}
+
+// ClosedTrade is the result of a close. Remaining is what did not fill.
+type ClosedTrade struct {
+	Coin           string  `json:"coin"`
+	Size           float64 `json:"size"`
+	AvgPx          float64 `json:"avg_px"`
+	Remaining      float64 `json:"remaining"`
+	StopsCancelled int     `json:"stops_cancelled"`
+}

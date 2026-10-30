@@ -142,6 +142,10 @@ type Service struct {
 	// of a basis point, that accounts approve.
 	Exchange func(mode string) *hyperliquid.Client
 	Builder  hyperliquid.Builder
+	// TradeMaxUSD and TradeMaxLeverage cap every trade; zero takes the
+	// defaults of $100 and 5x.
+	TradeMaxUSD      float64
+	TradeMaxLeverage int
 }
 
 // AddTenant creates a tenant, under the given ID or a new one. An ID that

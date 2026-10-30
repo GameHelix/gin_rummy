@@ -123,6 +123,8 @@ func (s *Server) routes() []route {
 		{pattern: "GET /v1/tenants/{tenant}/wallet", json: s.getWallet},
 		{pattern: "GET /v1/tenants/{tenant}/wallet/approvals", json: s.walletApprovals},
 		{pattern: "POST /v1/tenants/{tenant}/wallet/approvals", json: s.approveWallet},
+		{pattern: "POST /v1/tenants/{tenant}/trades", notifier: true, json: s.openTrade},
+		{pattern: "POST /v1/tenants/{tenant}/trades/close", notifier: true, json: s.closeTrade},
 		{pattern: "GET /v1/radar/alerts", notifier: true, json: s.radarAlerts},
 		{pattern: "GET /v1/radar/stream", notifier: true, raw: s.radarStream},
 	}

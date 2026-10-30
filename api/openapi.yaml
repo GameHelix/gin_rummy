@@ -391,6 +391,45 @@ paths:
         "400": {$ref: "#/components/responses/Error"}
         "404": {$ref: "#/components/responses/Error"}
         "409": {$ref: "#/components/responses/Error"}
+  /v1/tenants/{tenant}/trades:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+    post:
+      summary: Open a position with its stops in one batch
+      description: A market order within the slippage of the mid price, with a stop-loss and, when given, a take-profit as reduce-only trigger orders on the exchange, so the position is protected even if the engine stops. The builder fee rides on the order when the account approved it. Refused beyond the engine's limits, without an approved wallet, or when nothing filled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NewTrade"}
+      responses:
+        "200":
+          description: The position opened
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Trade"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+  /v1/tenants/{tenant}/trades/close:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+    post:
+      summary: Close a position and cancel its stops
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CloseTrade"}
+      responses:
+        "200":
+          description: What closed; remaining is what did not fill, still guarded by its stops
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ClosedTrade"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
   /v1/radar/alerts:
     get:
       summary: The radar's latest alerts
@@ -486,6 +525,47 @@ components:
         application/json:
           schema: {$ref: "#/components/schemas/Config"}
   schemas:
+    NewTrade:
+      type: object
+      required: [coin, side, usd, leverage, stop_loss_pct]
+      properties:
+        coin: {type: string, example: ETH}
+        side: {type: string, enum: [long, short]}
+        usd: {type: number, description: The position's size in dollars, within the engine's limit.}
+        leverage: {type: integer, minimum: 1}
+        stop_loss_pct: {type: number, description: Stop-loss as a fraction of the entry price; 0.1 is 10%.}
+        take_profit_pct: {type: number, description: Take-profit as a fraction of the entry price; none when absent.}
+        slippage_pct: {type: number, description: How far from the mid price the order may fill; 0.01 by default.}
+    Trade:
+      type: object
+      required: [coin, side, size, entry_px, usd, leverage, oid, stop_px, stop_oid]
+      properties:
+        coin: {type: string}
+        side: {type: string, enum: [long, short]}
+        size: {type: number, description: In the coin.}
+        entry_px: {type: number}
+        usd: {type: number}
+        leverage: {type: integer}
+        oid: {type: integer, description: The market order's exchange ID.}
+        stop_px: {type: number}
+        stop_oid: {type: integer}
+        take_profit_px: {type: number}
+        take_profit_oid: {type: integer}
+    CloseTrade:
+      type: object
+      required: [coin]
+      properties:
+        coin: {type: string}
+        slippage_pct: {type: number}
+    ClosedTrade:
+      type: object
+      required: [coin, size, avg_px, remaining, stops_cancelled]
+      properties:
+        coin: {type: string}
+        size: {type: number}
+        avg_px: {type: number}
+        remaining: {type: number}
+        stops_cancelled: {type: integer}
     Wallet:
       type: object
       required: [id, agent_address, agent_approved, builder_fee]

@@ -319,6 +319,16 @@ func openFleet(ctx context.Context, defaults config.Config, e env) (*fleet.Servi
 		return nil, nil, errors.New("HYPERLIQUID_BUILDER_FEE is the fee in tenths of a basis point, 0 to 1000")
 	}
 	svc.Builder = hyperliquid.Builder{Address: strings.ToLower(os.Getenv("HYPERLIQUID_BUILDER")), Fee: fee}
+	if v := os.Getenv("TRADE_MAX_USD"); v != "" {
+		if svc.TradeMaxUSD, err = strconv.ParseFloat(v, 64); err != nil || svc.TradeMaxUSD < 10 {
+			return nil, nil, errors.New("TRADE_MAX_USD is the largest position in dollars, at least 10")
+		}
+	}
+	if v := os.Getenv("TRADE_MAX_LEVERAGE"); v != "" {
+		if svc.TradeMaxLeverage, err = strconv.Atoi(v); err != nil || svc.TradeMaxLeverage < 1 || svc.TradeMaxLeverage > 50 {
+			return nil, nil, errors.New("TRADE_MAX_LEVERAGE is 1 to 50")
+		}
+	}
 	return svc, st.Close, nil
 }
 
