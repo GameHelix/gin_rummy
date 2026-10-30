@@ -21,20 +21,21 @@ type Source interface {
 
 // Alert is one unusual move. Changes are fractions: 0.05 is +5%.
 type Alert struct {
-	At           time.Time `json:"at"`
-	Coin         string    `json:"coin"`
-	Price        float64   `json:"price"`
-	Change15m    float64   `json:"change_15m"`
-	Change1h     float64   `json:"change_1h"`
-	Change24h    float64   `json:"change_24h"`
-	Sigma15m     float64   `json:"sigma_15m"`   // the 15m move in units of the coin's own 15m volatility
-	VolumeRate   float64   `json:"volume_rate"` // the last 15 minutes' volume against the day's 15-minute average
-	Volume24hUSD float64   `json:"volume_24h_usd"`
-	OIChange1h   float64   `json:"oi_change_1h"`
-	Funding      float64   `json:"funding"` // the hourly rate
-	Score        float64   `json:"score"`
-	Reasons      []string  `json:"reasons"`
-	History      string    `json:"history"` // what followed moves like this on perps since 2020
+	At           time.Time  `json:"at"`
+	Coin         string     `json:"coin"`
+	Price        float64    `json:"price"`
+	Change15m    float64    `json:"change_15m"`
+	Change1h     float64    `json:"change_1h"`
+	Change24h    float64    `json:"change_24h"`
+	Sigma15m     float64    `json:"sigma_15m"`   // the 15m move in units of the coin's own 15m volatility
+	VolumeRate   float64    `json:"volume_rate"` // the last 15 minutes' volume against the day's 15-minute average
+	Volume24hUSD float64    `json:"volume_24h_usd"`
+	OIChange1h   float64    `json:"oi_change_1h"`
+	Funding      float64    `json:"funding"` // the hourly rate
+	Score        float64    `json:"score"`
+	Reasons      []string   `json:"reasons"`
+	History      string     `json:"history"` // what followed moves like this on perps since 2020
+	Suggestion   Suggestion `json:"suggestion"`
 }
 
 // String is the alert as a chat shows it.
@@ -46,6 +47,9 @@ func (a Alert) String() string {
 	s := fmt.Sprintf("%s %s %s in 15m, %s in 1h, %s today · %s · %s", arrow, a.Coin, pct(a.Change15m), pct(a.Change1h), pct(a.Change24h), strings.Join(a.Reasons, ", "), money(a.Price))
 	if a.History != "" {
 		s += "\n" + a.History
+	}
+	if t := a.Suggestion.String(); t != "" {
+		s += "\n" + t
 	}
 	return s
 }
@@ -337,6 +341,7 @@ func (t *track) judge(now time.Time, coin string) (Alert, bool) {
 	a.Reasons = append(a.Reasons, "24h volume "+usd(a.Volume24hUSD))
 	a.Score = math.Abs(a.Sigma15m) + math.Abs(a.Change1h)/0.02 + math.Min(a.VolumeRate, 10)/2 + math.Abs(a.OIChange1h)*20
 	a.History = historyOf(a)
+	a.Suggestion = suggest(a)
 	return a, true
 }
 

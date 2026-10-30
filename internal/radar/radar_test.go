@@ -80,6 +80,24 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 	if h := historyOf(Alert{Change15m: 0.02, Funding: -0.0003}); !strings.HasPrefix(h, "Funding this negative") || !strings.Contains(h, "24h median") {
 		t.Fatalf("funding history %q", h)
 	}
+	if a.Suggestion.Side != "short" || a.Suggestion.StopLossPct != 0.08 || !strings.Contains(a.String(), "💡 short with a 8% stop") {
+		t.Fatalf("suggestion %+v in %q", a.Suggestion, a.String())
+	}
+	for _, c := range []struct {
+		in   Alert
+		side string
+		stop float64
+	}{
+		{Alert{Change15m: 0.05, VolumeRate: 1}, "", 0},
+		{Alert{Change15m: -0.12, Change24h: 0.6}, "short", 0.10},
+		{Alert{Change15m: -0.12, Change24h: -0.3}, "long", 0.15},
+		{Alert{Change15m: -0.05, Change24h: -0.3}, "", 0},
+		{Alert{Change15m: 0.01, Change1h: 0.07, Funding: -0.0004}, "short", 0.08},
+	} {
+		if got := suggest(c.in); got.Side != c.side || got.StopLossPct != c.stop {
+			t.Fatalf("suggest(%+v) = %+v", c.in, got)
+		}
+	}
 	if h := historyOf(Alert{Change15m: 0.06, VolumeRate: 3, Funding: 0.0005}); !strings.Contains(h, "such rises") || !strings.Contains(h, "Funding this high") {
 		t.Fatalf("move and funding history %q", h)
 	}

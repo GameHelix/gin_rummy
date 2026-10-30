@@ -652,6 +652,15 @@ components:
           items: {type: string}
         text: {type: string, description: The alert as a chat shows it, history included.}
         history: {type: string, description: What followed moves like this on Binance perpetuals since 2020; empty when the move is under 3% in 15 minutes.}
+        suggestion: {$ref: "#/components/schemas/TradeSuggestion"}
+    TradeSuggestion:
+      type: object
+      description: The trade the history argues for on an alert, with the stop it needs; absent when the record says stay out.
+      required: [side, stop_loss_pct, reason]
+      properties:
+        side: {type: string, enum: [long, short]}
+        stop_loss_pct: {type: number}
+        reason: {type: string}
     RadarAlertList:
       type: object
       required: [alerts]

@@ -269,22 +269,31 @@ func (e *Error) Error() string {
 // RadarAlert is one unusual move the radar raised on a Hyperliquid
 // perpetual. Changes are fractions: 0.05 is +5%.
 type RadarAlert struct {
-	Seq          int64     `json:"seq"`
-	At           time.Time `json:"at"`
-	Coin         string    `json:"coin"`
-	Price        float64   `json:"price"`
-	Change15m    float64   `json:"change_15m"`
-	Change1h     float64   `json:"change_1h"`
-	Change24h    float64   `json:"change_24h"`
-	Sigma15m     float64   `json:"sigma_15m"`
-	VolumeRate   float64   `json:"volume_rate"`
-	Volume24hUSD float64   `json:"volume_24h_usd"`
-	OIChange1h   float64   `json:"oi_change_1h"`
-	Funding      float64   `json:"funding"`
-	Score        float64   `json:"score"`
-	Reasons      []string  `json:"reasons"`
-	Text         string    `json:"text"`
-	History      string    `json:"history"`
+	Seq          int64            `json:"seq"`
+	At           time.Time        `json:"at"`
+	Coin         string           `json:"coin"`
+	Price        float64          `json:"price"`
+	Change15m    float64          `json:"change_15m"`
+	Change1h     float64          `json:"change_1h"`
+	Change24h    float64          `json:"change_24h"`
+	Sigma15m     float64          `json:"sigma_15m"`
+	VolumeRate   float64          `json:"volume_rate"`
+	Volume24hUSD float64          `json:"volume_24h_usd"`
+	OIChange1h   float64          `json:"oi_change_1h"`
+	Funding      float64          `json:"funding"`
+	Score        float64          `json:"score"`
+	Reasons      []string         `json:"reasons"`
+	Text         string           `json:"text"`
+	History      string           `json:"history"`
+	Suggestion   *TradeSuggestion `json:"suggestion,omitempty"`
+}
+
+// TradeSuggestion is the trade the history argues for on an alert, with
+// the stop it needs; absent when the record says stay out.
+type TradeSuggestion struct {
+	Side        string  `json:"side"`
+	StopLossPct float64 `json:"stop_loss_pct"`
+	Reason      string  `json:"reason"`
 }
 
 type RadarAlertList struct {
