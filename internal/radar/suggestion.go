@@ -22,12 +22,16 @@ func (s Suggestion) String() string {
 // they are shorted; rises on thin volume have continued, so they are left
 // alone. A crash after a pump has kept falling; a crash of a coin that
 // was not pumped has bounced, after dipping a further 8–10% first. Very
-// negative funding has meant the fall continues.
+// negative funding has meant the fall continues. A rise of 2% in an hour
+// with open interest up 10% has been the clearest fade of all: crowded
+// longs.
 func suggest(a Alert) Suggestion {
 	m := a.Change15m
 	switch {
 	case m >= 0.03 && a.VolumeRate >= 2:
 		return Suggestion{Side: "short", StopLossPct: 0.08, Reason: "rises on volume have faded; the few that kept going went far, hence the stop"}
+	case a.Change1h >= 0.02 && a.OIChange1h >= 0.10:
+		return Suggestion{Side: "short", StopLossPct: 0.08, Reason: "a rise with open interest surging has been the clearest fade: crowded longs"}
 	case m >= 0.03:
 		return Suggestion{}
 	case m <= -0.10:

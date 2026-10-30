@@ -93,6 +93,9 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 		{Alert{Change15m: -0.12, Change24h: -0.3}, "long", 0.15},
 		{Alert{Change15m: -0.05, Change24h: -0.3}, "", 0},
 		{Alert{Change15m: 0.01, Change1h: 0.07, Funding: -0.0004}, "short", 0.08},
+		{Alert{Change15m: 0.01, Change1h: 0.03, OIChange1h: 0.12}, "short", 0.08},
+		{Alert{Change15m: 0.04, VolumeRate: 1, Change1h: 0.05, OIChange1h: 0.15}, "short", 0.08},
+		{Alert{Change15m: 0.01, Change1h: 0.03, OIChange1h: 0.05}, "", 0},
 	} {
 		if got := suggest(c.in); got.Side != c.side || got.StopLossPct != c.stop {
 			t.Fatalf("suggest(%+v) = %+v", c.in, got)
