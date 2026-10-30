@@ -33,6 +33,8 @@ func suggest(a Alert) Suggestion {
 	switch {
 	case a.Rule == RuleSpikeRejected:
 		return Suggestion{Side: "short", StopLossPct: 0.08, Reason: "spikes given back within the quarter hour have kept sinking"}
+	case a.Rule == RuleFundingFlip:
+		return Suggestion{Side: "short", StopLossPct: 0.08, Reason: "very negative funding has meant the fall continues"}
 	case a.Rule == RuleBigHour && a.Change1h > 0:
 		return Suggestion{Side: "short", StopLossPct: 0.08, Reason: "hours of +6% have faded in every year since 2021"}
 	case m >= 0.03 && a.VolumeRate >= 2:

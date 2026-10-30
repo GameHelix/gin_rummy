@@ -55,6 +55,12 @@ type triggerOutcome struct {
 	Up4h      float64 `json:"up_4h"`
 	Median24h float64 `json:"median_24h"`
 	Up24h     float64 `json:"up_24h"`
+	// Median24hSince2025 is the 24h median over 2025 and 2026 alone, and
+	// YearsAgree the share of years whose 24h median had the overall sign:
+	// a rule that held in every year is worth more than one that held on
+	// average.
+	Median24hSince2025 float64 `json:"median_24h_2025on"`
+	YearsAgree         float64 `json:"years_agree"`
 }
 
 var triggers map[string]triggerOutcome
@@ -103,7 +109,11 @@ func triggerHistory(a Alert) string {
 	if !ok || o.N < 50 {
 		return ""
 	}
-	return fmt.Sprintf("%s such alerts since 2021 → 4h %s (%.0f%% up) · 24h %s (%.0f%% up)", count(o.N), pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
+	agreed := "every year agreed"
+	if o.YearsAgree < 1 {
+		agreed = fmt.Sprintf("%.0f%% of years agreed", o.YearsAgree*100)
+	}
+	return fmt.Sprintf("%s such alerts since 2021 → 4h %s (%.0f%% up) · 24h %s (%.0f%% up) · since 2025 %s · %s", count(o.N), pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100, pct(o.Median24hSince2025), agreed)
 }
 
 // Hourly funding rates that match the study's 8-hour extremes.

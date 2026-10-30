@@ -68,7 +68,7 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 	if a.Change15m < 0.03 || a.VolumeRate < 2 || a.Sigma15m < 3 || !strings.Contains(a.String(), "the usual volume") || !strings.Contains(a.String(), "⚡ BIG MOVE — ETH") || !strings.Contains(a.History, "such alerts") {
 		t.Fatalf("alert %s (%+v)", a, a)
 	}
-	if !strings.Contains(a.History, "such alerts") || !strings.Contains(a.String(), "📚 "+a.History) {
+	if !strings.Contains(a.History, "such alerts") || !strings.Contains(a.History, "since 2025") || !strings.Contains(a.History, "years agreed") && !strings.Contains(a.History, "every year agreed") || !strings.Contains(a.String(), "📚 "+a.History) {
 		t.Fatalf("history %q", a.History)
 	}
 	if h := historyOf(Alert{Change15m: -0.12, Change24h: 0.6, VolumeRate: 3}); !strings.Contains(h, "risen 50%+") {
@@ -93,6 +93,7 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 		{Alert{Change15m: -0.12, Change24h: -0.3}, "long", 0.15},
 		{Alert{Change15m: -0.05, Change24h: -0.3}, "", 0},
 		{Alert{Change15m: 0.01, Change1h: 0.07, Funding: -0.0004}, "short", 0.08},
+		{Alert{Rule: RuleFundingFlip, Change15m: 0.035, VolumeRate: 1, Funding: -0.00035}, "short", 0.08},
 		{Alert{Change15m: 0.01, Change1h: 0.03, OIChange1h: 0.12}, "short", 0.08},
 		{Alert{Change15m: 0.04, VolumeRate: 1, Change1h: 0.05, OIChange1h: 0.15}, "short", 0.08},
 		{Alert{Change15m: 0.01, Change1h: 0.03, OIChange1h: 0.05}, "", 0},
