@@ -637,6 +637,7 @@ components:
         seq: {type: integer}
         at: {type: string, format: date-time}
         coin: {type: string, example: HYPE}
+        rule: {type: string, description: "The trigger: pump-and-crash, unpumped crash, crowded rise, spike rejected, big move, big hour, open interest swing, funding flip."}
         price: {type: number}
         change_15m: {type: number}
         change_1h: {type: number}

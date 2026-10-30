@@ -272,6 +272,7 @@ type RadarAlert struct {
 	Seq          int64            `json:"seq"`
 	At           time.Time        `json:"at"`
 	Coin         string           `json:"coin"`
+	Rule         string           `json:"rule"`
 	Price        float64          `json:"price"`
 	Change15m    float64          `json:"change_15m"`
 	Change1h     float64          `json:"change_1h"`

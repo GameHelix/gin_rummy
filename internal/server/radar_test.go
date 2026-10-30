@@ -29,13 +29,13 @@ func TestTheRadarIsListedAndStreamed(t *testing.T) {
 		return resp
 	}
 
-	rl.Add(radar.Alert{At: time.Date(2026, 10, 29, 20, 0, 0, 0, time.UTC), Coin: "HYPE", Price: 81.4, Change15m: 0.052, Change1h: 0.07, VolumeRate: 6.2, Reasons: []string{"6× the usual volume"}})
+	rl.Add(radar.Alert{At: time.Date(2026, 10, 29, 20, 0, 0, 0, time.UTC), Coin: "HYPE", Rule: "big move", Price: 81.4, Change15m: 0.052, Change1h: 0.07, VolumeRate: 6.2, Reasons: []string{"6× the usual volume"}})
 	resp := get("/v1/radar/alerts", s.NotifierToken)
 	var list api.RadarAlertList
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("alerts: %d %v", resp.StatusCode, err)
 	}
-	if len(list.Alerts) != 1 || list.Alerts[0].Seq != 1 || list.Alerts[0].Coin != "HYPE" || !strings.HasPrefix(list.Alerts[0].Text, "🚀 HYPE +5.2% in 15m") {
+	if len(list.Alerts) != 1 || list.Alerts[0].Seq != 1 || list.Alerts[0].Coin != "HYPE" || !strings.HasPrefix(list.Alerts[0].Text, "🚀 big move · HYPE +5.2% in 15m") || list.Alerts[0].Rule != "big move" {
 		t.Fatalf("alerts %+v", list.Alerts)
 	}
 	if resp := get("/v1/radar/alerts?after=1", token); resp.StatusCode != http.StatusOK {

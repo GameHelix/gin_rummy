@@ -65,10 +65,10 @@ func TestAJumpOnVolumeAlertsOnceAndRespectsTheCooldown(t *testing.T) {
 		t.Fatalf("alerts %+v", alerts)
 	}
 	a := alerts[0]
-	if a.Change15m < 0.03 || a.VolumeRate < 2 || a.Sigma15m < 3 || !strings.Contains(a.String(), "the usual volume") || !strings.Contains(a.String(), "🚀 ETH") {
+	if a.Change15m < 0.03 || a.VolumeRate < 2 || a.Sigma15m < 3 || !strings.Contains(a.String(), "the usual volume") || !strings.Contains(a.String(), "🚀 big move · ETH") || !strings.Contains(a.History, "such alerts") {
 		t.Fatalf("alert %s (%+v)", a, a)
 	}
-	if !strings.HasPrefix(a.History, "After ") || !strings.Contains(a.History, "such rises") || !strings.Contains(a.String(), "\n"+a.History) {
+	if !strings.HasPrefix(a.History, "After ") || !strings.Contains(a.History, "such alerts") || !strings.Contains(a.String(), "\n"+a.History) {
 		t.Fatalf("history %q", a.History)
 	}
 	if h := historyOf(Alert{Change15m: -0.12, Change24h: 0.6, VolumeRate: 3}); !strings.Contains(h, "risen 50%+") {

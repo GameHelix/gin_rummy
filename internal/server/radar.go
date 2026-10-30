@@ -21,7 +21,7 @@ func radarOut(e radar.Entry) api.RadarAlert {
 	if e.Suggestion.Side != "" {
 		sug = &api.TradeSuggestion{Side: e.Suggestion.Side, StopLossPct: e.Suggestion.StopLossPct, Reason: e.Suggestion.Reason}
 	}
-	return api.RadarAlert{Seq: e.Seq, At: e.At, Coin: e.Coin, Price: e.Price, Change15m: e.Change15m, Change1h: e.Change1h, Change24h: e.Change24h,
+	return api.RadarAlert{Seq: e.Seq, At: e.At, Coin: e.Coin, Rule: e.Rule, Price: e.Price, Change15m: e.Change15m, Change1h: e.Change1h, Change24h: e.Change24h,
 		Sigma15m: e.Sigma15m, VolumeRate: e.VolumeRate, Volume24hUSD: e.Volume24hUSD, OIChange1h: e.OIChange1h, Funding: e.Funding, Score: e.Score, Reasons: reasons, Text: e.String(), History: e.History, Suggestion: sug}
 }
 

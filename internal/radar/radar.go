@@ -23,6 +23,7 @@ type Source interface {
 type Alert struct {
 	At           time.Time  `json:"at"`
 	Coin         string     `json:"coin"`
+	Rule         string     `json:"rule"` // the trigger that raised it
 	Price        float64    `json:"price"`
 	Change15m    float64    `json:"change_15m"`
 	Change1h     float64    `json:"change_1h"`
@@ -44,7 +45,11 @@ func (a Alert) String() string {
 	if a.Change15m < 0 {
 		arrow = "🔻"
 	}
-	s := fmt.Sprintf("%s %s %s in 15m, %s in 1h, %s today · %s · %s", arrow, a.Coin, pct(a.Change15m), pct(a.Change1h), pct(a.Change24h), strings.Join(a.Reasons, ", "), money(a.Price))
+	head := arrow + " " + a.Coin
+	if a.Rule != "" {
+		head = arrow + " " + a.Rule + " · " + a.Coin
+	}
+	s := fmt.Sprintf("%s %s in 15m, %s in 1h, %s today · %s · %s", head, pct(a.Change15m), pct(a.Change1h), pct(a.Change24h), strings.Join(a.Reasons, ", "), money(a.Price))
 	if a.History != "" {
 		s += "\n" + a.History
 	}
@@ -103,9 +108,10 @@ type sample struct {
 }
 
 type track struct {
-	samples   []sample // oldest first, at most a day
-	lastAlert time.Time
-	seeded    bool // from candles, until the first live sample
+	samples        []sample // oldest first, at most a day
+	lastAlert      time.Time
+	fundingAlertAt time.Time
+	seeded         bool // from candles, until the first live sample
 }
 
 // History gives past candles, to warm the watcher up at start.
@@ -259,11 +265,16 @@ func (w *Watcher) Observe(now time.Time, assets []hyperliquid.Asset, markets []h
 			w.coins[a.Name] = tr
 		}
 		tr.add(sample{at: now, mid: m.MidPx, oi: m.OpenInterest, dayVol: m.DayVolumeUSD, prevDay: m.PrevDayPx, funding: m.Funding})
-		if m.DayVolumeUSD < minVol || now.Sub(tr.lastAlert) < cooldown {
+		if m.DayVolumeUSD < minVol {
 			continue
 		}
-		if al, ok := tr.judge(now, a.Name); ok {
-			tr.lastAlert = now
+		if now.Sub(tr.lastAlert) >= cooldown {
+			if al, ok := tr.judge(now, a.Name); ok {
+				tr.lastAlert = now
+				alerts = append(alerts, al)
+			}
+		}
+		if al, ok := tr.fundingFlip(now, a.Name); ok {
 			alerts = append(alerts, al)
 		}
 	}
@@ -299,13 +310,14 @@ func (t *track) back(now time.Time, d time.Duration) (sample, bool) {
 	return sample{}, false
 }
 
-// judge decides whether the latest sample is an unusual move.
-func (t *track) judge(now time.Time, coin string) (Alert, bool) {
+// measure takes the latest sample's bearings: the moves, the volume, the
+// open interest, and the last 15 minutes' highest and lowest prices.
+func (t *track) measure(now time.Time, coin string) (Alert, float64, float64, bool) {
 	cur := t.samples[len(t.samples)-1]
 	s15, ok15 := t.back(now, 15*time.Minute)
 	s1h, ok1h := t.back(now, time.Hour)
 	if !ok15 || !ok1h {
-		return Alert{}, false
+		return Alert{}, 0, 0, false
 	}
 	a := Alert{At: now, Coin: coin, Price: cur.mid, Volume24hUSD: cur.dayVol, Funding: cur.funding}
 	a.Change15m = cur.mid/s15.mid - 1
@@ -322,24 +334,94 @@ func (t *track) judge(now time.Time, coin string) (Alert, bool) {
 		a.VolumeRate = math.Max(0, cur.dayVol-s15.dayVol) / avg
 	}
 	a.Sigma15m = a.Change15m / math.Max(t.sigma15(now), 0.002)
+	high, low := s15.mid, s15.mid
+	for i := len(t.samples) - 1; i >= 0 && t.samples[i].at.After(s15.at); i-- {
+		high, low = math.Max(high, t.samples[i].mid), math.Min(low, t.samples[i].mid)
+	}
+	return a, high, low, true
+}
 
+// The rules, named as the alerts show them. Each was measured on every
+// perpetual from 2021 to 2026 (see history_triggers.json).
+const (
+	RulePumpAndCrash  = "pump-and-crash"
+	RuleUnpumpedCrash = "unpumped crash"
+	RuleCrowdedRise   = "crowded rise"
+	RuleSpikeRejected = "spike rejected"
+	RuleBigMove       = "big move"
+	RuleBigHour       = "big hour"
+	RuleOISwing       = "open interest swing"
+	RuleFundingFlip   = "funding flip"
+)
+
+// judge decides whether the latest sample is a move worth an alert, and
+// names the rule that fires. A crash of 10% is judged by what came
+// before it; a rise with open interest piling in is a crowded rise; a
+// spike that gave back its gain within the quarter hour is a rejected
+// spike; the rest are the moves large for the coin, large hours, and
+// swings in open interest.
+func (t *track) judge(now time.Time, coin string) (Alert, bool) {
+	a, high, _, ok := t.measure(now, coin)
+	if !ok {
+		return Alert{}, false
+	}
+	open := a.Price / (1 + a.Change15m)
+	wick := (high - math.Max(open, a.Price)) / open
+	prior := (1+a.Change24h)/(1+a.Change15m) - 1
 	big15 := math.Abs(a.Change15m) >= 0.03 && math.Abs(a.Sigma15m) >= 3 && a.VolumeRate >= 2
 	big1h := math.Abs(a.Change1h) >= 0.06
 	oiSwing := math.Abs(a.OIChange1h) >= 0.10 && math.Abs(a.Change1h) >= 0.02
-	if !big15 && !big1h && !oiSwing {
+	switch {
+	case a.Change15m <= -0.10 && prior >= 0.2:
+		a.Rule = RulePumpAndCrash
+		a.Reasons = append(a.Reasons, "after "+pct(prior)+" the day before")
+	case a.Change15m <= -0.10:
+		a.Rule = RuleUnpumpedCrash
+	case a.Change1h >= 0.02 && a.OIChange1h >= 0.10:
+		a.Rule = RuleCrowdedRise
+	case wick >= 0.05 && a.Price <= open:
+		a.Rule = RuleSpikeRejected
+		a.Reasons = append(a.Reasons, fmt.Sprintf("a spike of %s given back", pct(high/open-1)))
+	case big15:
+		a.Rule = RuleBigMove
+	case big1h:
+		a.Rule = RuleBigHour
+	case oiSwing:
+		a.Rule = RuleOISwing
+	default:
 		return Alert{}, false
 	}
-	if big15 {
+	if a.VolumeRate >= 2 {
 		a.Reasons = append(a.Reasons, fmt.Sprintf("%.0f× the usual volume", a.VolumeRate))
 	}
-	if oiSwing {
+	if math.Abs(a.OIChange1h) >= 0.10 {
 		a.Reasons = append(a.Reasons, "open interest "+pct(a.OIChange1h)+" in 1h")
 	}
 	if math.Abs(a.Funding) >= 0.0005 {
 		a.Reasons = append(a.Reasons, fmt.Sprintf("funding %+.2f%%/h", a.Funding*100))
 	}
 	a.Reasons = append(a.Reasons, "24h volume "+usd(a.Volume24hUSD))
-	a.Score = math.Abs(a.Sigma15m) + math.Abs(a.Change1h)/0.02 + math.Min(a.VolumeRate, 10)/2 + math.Abs(a.OIChange1h)*20
+	a.Score = math.Abs(a.Sigma15m) + math.Abs(a.Change1h)/0.02 + math.Min(a.VolumeRate, 10)/2 + math.Abs(a.OIChange1h)*20 + wick*50
+	a.History = historyOf(a)
+	a.Suggestion = suggest(a)
+	return a, true
+}
+
+// fundingFlip raises an alert when funding is very negative, once a day
+// per coin, whatever the price is doing: such coins have kept falling.
+func (t *track) fundingFlip(now time.Time, coin string) (Alert, bool) {
+	cur := t.samples[len(t.samples)-1]
+	if cur.funding > fundingVeryNegative || now.Sub(t.fundingAlertAt) < 24*time.Hour {
+		return Alert{}, false
+	}
+	a, _, _, ok := t.measure(now, coin)
+	if !ok {
+		return Alert{}, false
+	}
+	t.fundingAlertAt = now
+	a.Rule = RuleFundingFlip
+	a.Reasons = append(a.Reasons, fmt.Sprintf("funding %+.3f%%/h, shorts paying", a.Funding*100), "24h volume "+usd(a.Volume24hUSD))
+	a.Score = 1
 	a.History = historyOf(a)
 	a.Suggestion = suggest(a)
 	return a, true

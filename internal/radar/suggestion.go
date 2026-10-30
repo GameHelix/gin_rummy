@@ -28,6 +28,10 @@ func (s Suggestion) String() string {
 func suggest(a Alert) Suggestion {
 	m := a.Change15m
 	switch {
+	case a.Rule == RuleSpikeRejected:
+		return Suggestion{Side: "short", StopLossPct: 0.08, Reason: "spikes given back within the quarter hour have kept sinking"}
+	case a.Rule == RuleBigHour && a.Change1h > 0:
+		return Suggestion{Side: "short", StopLossPct: 0.08, Reason: "hours of +6% have faded in every year since 2021"}
 	case m >= 0.03 && a.VolumeRate >= 2:
 		return Suggestion{Side: "short", StopLossPct: 0.08, Reason: "rises on volume have faded; the few that kept going went far, hence the stop"}
 	case a.Change1h >= 0.02 && a.OIChange1h >= 0.10:

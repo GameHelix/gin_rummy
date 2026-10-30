@@ -21,6 +21,9 @@ var crashJSON []byte
 //go:embed history_funding.json
 var fundingJSON []byte
 
+//go:embed history_triggers.json
+var triggersJSON []byte
+
 type outcome struct {
 	N         int     `json:"n"`
 	Median4h  float64 `json:"median_4h"`
@@ -44,10 +47,63 @@ type fundingOutcome struct {
 
 var funding map[string]fundingOutcome
 
+// triggerOutcome is what followed each named rule on every perpetual
+// from 2021 to 2026, bought at the next bar, before costs.
+type triggerOutcome struct {
+	N         int     `json:"n"`
+	Median4h  float64 `json:"median_4h"`
+	Up4h      float64 `json:"up_4h"`
+	Median24h float64 `json:"median_24h"`
+	Up24h     float64 `json:"up_24h"`
+}
+
+var triggers map[string]triggerOutcome
+
 func init() {
 	json.Unmarshal(afterMoveJSON, &afterMove)
 	json.Unmarshal(crashJSON, &crash)
 	json.Unmarshal(fundingJSON, &funding)
+	json.Unmarshal(triggersJSON, &triggers)
+}
+
+// triggerKey names the study row that matches an alert's rule.
+func triggerKey(a Alert) string {
+	switch a.Rule {
+	case RulePumpAndCrash:
+		return "crash 10%+ after 20%+ pump"
+	case RuleUnpumpedCrash:
+		return "crash 10%+ of unpumped coin"
+	case RuleCrowdedRise:
+		return "rise 1h 2%+ with OI +10%"
+	case RuleSpikeRejected:
+		return "upper wick 5%+ rejected"
+	case RuleFundingFlip:
+		return "funding <= -0.2%"
+	case RuleBigMove:
+		if a.Change15m > 0 {
+			return "rise 15m 3σ on 2x volume (radar)"
+		}
+		return "drop 15m 3σ on 2x volume (radar)"
+	case RuleBigHour:
+		if a.Change1h > 0 {
+			return "hour +6% (radar)"
+		}
+		return "hour -6% (radar)"
+	case RuleOISwing:
+		if a.Change1h < 0 {
+			return "drop 1h 2%+ with OI +10%"
+		}
+	}
+	return ""
+}
+
+// triggerHistory words what followed this rule, or nothing.
+func triggerHistory(a Alert) string {
+	o, ok := triggers[triggerKey(a)]
+	if !ok || o.N < 50 {
+		return ""
+	}
+	return fmt.Sprintf("After %s such alerts (perps, 2021–2026): 4h median %s, %.0f%% up; 24h %s, %.0f%% up.", count(o.N), pct(o.Median4h), o.Up4h*100, pct(o.Median24h), o.Up24h*100)
 }
 
 // Hourly funding rates that match the study's 8-hour extremes.
@@ -78,7 +134,13 @@ func fundingNote(hourly float64) string {
 // extreme, what followed that; nothing for a smaller move at ordinary
 // funding.
 func historyOf(a Alert) string {
-	move, note := moveHistory(a), fundingNote(a.Funding)
+	move, note := triggerHistory(a), fundingNote(a.Funding)
+	if move == "" {
+		move = moveHistory(a)
+	}
+	if a.Rule == RuleFundingFlip {
+		note = ""
+	}
 	switch {
 	case move != "" && note != "":
 		return move + " " + note
