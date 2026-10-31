@@ -55,7 +55,7 @@ func TestAWalletIsMadeOnceAndApprovedWithTheExchange(t *testing.T) {
 	s.Builder = hyperliquid.Builder{Address: "0xabcdef0123456789abcdef0123456789abcdef01", Fee: 50}
 	ctx := context.Background()
 	tenant := uuid.New()
-	if err := s.Store.CreateTenant(ctx, pg.Tenant{ID: tenant, Name: "acme", Entitlements: []byte("{}")}); err != nil {
+	if err := s.Store.CreateTenant(ctx, pg.Tenant{ID: tenant, Name: "acme"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -117,9 +117,6 @@ func TestAWalletIsMadeOnceAndApprovedWithTheExchange(t *testing.T) {
 	_, signer, err := s.WalletSigner(ctx, tenant)
 	if err != nil || signer.Address() != w.Agent {
 		t.Fatalf("signer: %v", err)
-	}
-	if _, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindHyperliquid, Secret: []byte(`{"key":"x"}`)}); !errors.As(err, &refused) {
-		t.Fatalf("AddKey of a wallet: %v", err)
 	}
 	if _, _, err := s.WalletAccount(ctx, uuid.New()); !errors.Is(err, pg.ErrNotFound) {
 		t.Fatalf("no wallet: %v", err)

@@ -2,17 +2,31 @@ package pg
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/candylario/trader/internal/testkit"
 	"github.com/candylario/trader/internal/vault"
 )
 
-func TestTenantsAgentsVersionsAndKeys(t *testing.T) {
+// testDB returns a fresh, migrated database, or skips the test.
+func testDB(t *testing.T) string {
+	t.Helper()
+	url := testkit.Database(t)
+	ctx := context.Background()
+	if err := Migrate(ctx, url); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, url); err != nil {
+		t.Fatalf("migrations must be idempotent: %v", err)
+	}
+	return url
+}
+
+func TestTenantsAndTheirKeysStayApart(t *testing.T) {
 	url := testDB(t)
 	ctx := context.Background()
 	s, err := Open(ctx, url)
@@ -20,100 +34,118 @@ func TestTenantsAgentsVersionsAndKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	a, b := Tenant{ID: uuid.New(), Name: "alice", Entitlements: json.RawMessage(`{"symbols":["BTCUSDT"]}`)}, Tenant{ID: uuid.New(), Name: "bob", Entitlements: json.RawMessage(`{}`)}
+	a, b := Tenant{ID: uuid.New(), Name: "alice"}, Tenant{ID: uuid.New(), Name: "bob"}
 	for _, tn := range []Tenant{a, b} {
 		if err := s.CreateTenant(ctx, tn); err != nil {
 			t.Fatal(err)
 		}
 	}
-	agent := AgentRow{ID: uuid.New(), Tenant: a.ID, Name: "btc", Mode: "testnet"}
-	if err := s.CreateAgent(ctx, agent, nil, "", nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateAgent(ctx, AgentRow{ID: uuid.New(), Tenant: a.ID, Name: "btc", Mode: "live"}, nil, "", nil); !errors.Is(err, ErrExists) {
-		t.Fatalf("agent names are unique per tenant: %v", err)
-	}
 	if err := s.CreateTenant(ctx, a); !errors.Is(err, ErrExists) {
 		t.Fatalf("tenant IDs are unique: %v", err)
 	}
-	for i, cfg := range []string{`{"capital_usd":100}`, `{"capital_usd":200}`} {
-		v, err := s.AddVersion(ctx, a.ID, agent.ID, json.RawMessage(cfg), "test")
-		if err != nil || v != i+1 {
-			t.Fatalf("version %d: %v", v, err)
-		}
-	}
-	if old, _ := s.Version(ctx, a.ID, agent.ID, 1); string(old) != `{"capital_usd": 100}` {
-		t.Fatalf("earlier versions are kept as they were: %s", old)
-	}
-	if run, _ := s.Runnable(ctx); len(run) != 0 {
-		t.Fatal("a stopped agent must not run")
-	}
-	if err := s.SetStatus(ctx, a.ID, agent.ID, StatusActive); err != nil {
-		t.Fatal(err)
-	}
-	if run, _ := s.Runnable(ctx); len(run) != 0 {
-		t.Fatal("an agent without keys must not run")
-	}
-
 	master, _ := vault.NewMasterKey()
 	v, _ := vault.New(master)
-	id, model := uuid.New(), uuid.New()
-	sealed, _ := v.Seal([]byte(id.String()), []byte(`{"key":"k","secret":"s"}`))
-	for kind, cid := range map[string]uuid.UUID{"binance": id, "anthropic": model} {
-		if err := s.PutCredential(ctx, Credential{ID: cid, Tenant: a.ID, Kind: kind, Label: "main", Hint: "…wxyz", Sealed: sealed}); err != nil {
-			t.Fatal(err)
-		}
-		if err := s.Attach(ctx, a.ID, agent.ID, cid, kind); err != nil {
-			t.Fatal(err)
-		}
+	id := uuid.New()
+	sealed, _ := v.Seal([]byte(id.String()), []byte(`{"key":"k"}`))
+	if err := s.PutCredential(ctx, Credential{ID: id, Tenant: a.ID, Kind: "hyperliquid", Label: "wallet", Hint: "0xabc", Sealed: sealed}); err != nil {
+		t.Fatal(err)
 	}
-	if run, err := s.Runnable(ctx); err != nil || len(run) != 1 || run[0].Agent != agent.ID || run[0].Version != 2 || run[0].Keys != model.String()+","+id.String() {
-		t.Fatalf("runnable: %+v %v", run, err)
-	}
-	second := AgentRow{ID: uuid.New(), Tenant: a.ID, Name: "eth", Mode: "testnet"}
-	if err := s.CreateAgent(ctx, second, json.RawMessage(`{}`), "test", map[string]uuid.UUID{"binance": id}); !errors.Is(err, ErrKeyInUse) {
-		t.Fatalf("an exchange key serves one agent only: %v", err)
-	}
-	if _, err := s.Agent(ctx, a.ID, second.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatal("a refused agent is not half created")
-	}
-	s.CreateAgent(ctx, second, nil, "", nil)
-	if err := s.Attach(ctx, a.ID, second.ID, id, "binance"); !errors.Is(err, ErrKeyInUse) {
-		t.Fatalf("an exchange key serves one agent only: %v", err)
+	if err := s.PutCredential(ctx, Credential{ID: uuid.New(), Tenant: a.ID, Kind: "anthropic", Label: "model", Hint: "…wxyz", Sealed: sealed}); err == nil {
+		t.Fatal("only wallets are stored")
 	}
 	c, err := s.Credential(ctx, a.ID, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plain, err := v.Open([]byte(id.String()), c.Sealed); err != nil || string(plain) != `{"key":"k","secret":"s"}` {
+	if plain, err := v.Open([]byte(id.String()), c.Sealed); err != nil || string(plain) != `{"key":"k"}` {
 		t.Fatalf("stored key: %s %v", plain, err)
 	}
 	if _, err := s.Credential(ctx, b.ID, id); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("another tenant must not see the key: %v", err)
 	}
-	if _, err := s.Agent(ctx, b.ID, agent.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatal("another tenant must not see the agent")
+	var none int
+	pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error { return tx.QueryRow(ctx, "select count(*) from credentials").Scan(&none) })
+	if none != 0 {
+		t.Fatal("without a tenant no keys are visible")
 	}
-	err = s.inTenant(ctx, a.ID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, "update agent_versions set config = '{}'")
-		return err
-	})
-	if err == nil {
-		t.Fatal("config versions must not be editable")
+
+	if err := s.CloseTenant(ctx, a.ID); err != nil {
+		t.Fatal(err)
 	}
-	if keys, _ := s.Credentials(ctx, a.ID); len(keys) != 2 {
-		t.Fatalf("keys: %+v", keys)
+	if tn, _ := s.Tenant(ctx, a.ID); tn.Status != TenantClosed || tn.Name != "" {
+		t.Fatalf("a closed tenant keeps no name: %+v", tn)
 	}
-	if users, err := s.RevokeCredential(ctx, a.ID, id); err != nil || len(users) != 1 || users[0] != agent.ID {
-		t.Fatalf("revoke: %v %v", users, err)
+	if c, err := s.Credential(ctx, a.ID, id); err != nil || !c.Revoked || c.Hint != "" || len(c.Sealed.Ciphertext) != 0 || len(c.Sealed.WrappedKey) != 0 {
+		t.Fatalf("the key is not erased: %+v %v", c, err)
 	}
-	if att, _ := s.Attached(ctx, a.ID, agent.ID); len(att) != 1 {
-		t.Fatal("a revoked key is detached")
+	if err := s.CloseTenant(ctx, a.ID); err != nil {
+		t.Fatalf("closing twice: %v", err)
 	}
-	if run, _ := s.Runnable(ctx); len(run) != 0 {
-		t.Fatal("an agent whose exchange key was revoked must not run")
+	if err := s.CloseTenant(ctx, uuid.New()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an unknown tenant: %v", err)
 	}
-	if _, err := s.RevokeCredential(ctx, a.ID, id); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("revoking twice: %v", err)
+	if tn, _ := s.Tenant(ctx, b.ID); tn.Status != "active" || tn.Name != "bob" {
+		t.Fatalf("another tenant changed: %+v", tn)
+	}
+}
+
+// The agent's last migration deletes the model and exchange keys and stops
+// the agents, and leaves wallets and the audit log alone.
+func TestTheAgentsKeysGoWithIt(t *testing.T) {
+	url := testkit.Database(t)
+	ctx := context.Background()
+	if err := migrate(ctx, url, 6); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close(ctx)
+	tenant, agent := uuid.New(), uuid.New()
+	keys := map[string]uuid.UUID{"anthropic": uuid.New(), "binance": uuid.New(), "hyperliquid": uuid.New()}
+	if _, err := owner.Exec(ctx, "select ensure_event_partition('2026-10-30')"); err != nil {
+		t.Fatal(err)
+	}
+	steps := []struct {
+		sql  string
+		args []any
+	}{
+		{"insert into tenants (id, name) values ($1, 'alice')", []any{tenant}},
+		{"insert into agents (id, tenant_id, name, mode, status) values ($1, $2, 'btc-eth', 'testnet', 'active')", []any{agent, tenant}},
+		{"insert into events (id, tenant_id, agent_id, seq, type, at, body, hash) values (gen_random_uuid(), $1, $2, 1, 'notice', '2026-10-30T00:00:00Z', '{}', '\\x00')", []any{tenant, agent}},
+	}
+	for _, st := range steps {
+		if _, err := owner.Exec(ctx, st.sql, st.args...); err != nil {
+			t.Fatal(st.sql, err)
+		}
+	}
+	for kind, id := range keys {
+		if _, err := owner.Exec(ctx, `insert into credentials (id, tenant_id, kind, label, hint, ciphertext, nonce, wrapped_key, key_nonce, master_version)
+			values ($1, $2, $3, 'main', '…', '\x01', '\x01', '\x01', '\x01', 1)`, id, tenant, kind); err != nil {
+			t.Fatal(err)
+		}
+		if kind != "hyperliquid" {
+			if _, err := owner.Exec(ctx, "insert into agent_credentials (agent_id, tenant_id, kind, credential_id) values ($1, $2, $3, $4)", agent, tenant, kind, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := Migrate(ctx, url); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	rows, _ := owner.Query(ctx, "select kind from credentials")
+	kinds, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil || len(kinds) != 1 || kinds[0] != "hyperliquid" {
+		t.Fatalf("only the wallet is left: %v %v", kinds, err)
+	}
+	var attached, events int
+	var status string
+	owner.QueryRow(ctx, "select count(*) from agent_credentials").Scan(&attached)
+	owner.QueryRow(ctx, "select status from agents where id = $1", agent).Scan(&status)
+	owner.QueryRow(ctx, "select count(*) from events").Scan(&events)
+	if attached != 0 || status != "stopped" || events != 1 {
+		t.Fatalf("attached %d, agent %s, events %d", attached, status, events)
 	}
 }

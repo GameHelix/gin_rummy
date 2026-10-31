@@ -99,7 +99,7 @@ func TestATradeOpensWithItsStopsAndClosesCleanly(t *testing.T) {
 	s.Builder = hyperliquid.Builder{Address: "0xabcdef0123456789abcdef0123456789abcdef01", Fee: 50}
 	ctx := context.Background()
 	tenant := uuid.New()
-	if err := s.Store.CreateTenant(ctx, pg.Tenant{ID: tenant, Name: "acme", Entitlements: []byte("{}")}); err != nil {
+	if err := s.Store.CreateTenant(ctx, pg.Tenant{ID: tenant, Name: "acme"}); err != nil {
 		t.Fatal(err)
 	}
 	var refused *Refused

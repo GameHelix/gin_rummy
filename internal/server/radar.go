@@ -31,6 +31,22 @@ func radarOut(e radar.Entry) api.RadarAlert {
 		Sigma15m: e.Sigma15m, VolumeRate: e.VolumeRate, Volume24hUSD: e.Volume24hUSD, OIChange1h: e.OIChange1h, Funding: e.Funding, Score: e.Score, Reasons: reasons, Text: e.String(), History: e.History, Suggestion: sug, Momentum: mom}
 }
 
+// after reads where a read starts: Last-Event-ID, then ?after.
+func after(r *http.Request) (int64, error) {
+	v := r.Header.Get("Last-Event-ID")
+	if v == "" {
+		v = r.URL.Query().Get("after")
+	}
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return 0, badRequest("after must be a sequence number")
+	}
+	return n, nil
+}
+
 func (s *Server) radarOn() error {
 	if s.Radar == nil {
 		return &apiError{http.StatusServiceUnavailable, "radar_off", "the radar is not running"}

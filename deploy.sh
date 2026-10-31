@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploys the trader to a server prepared by candylario/infra: builds the pushed
 # commit for the server's CPU as trader:COMMIT, copies it over SSH with
-# compose.yaml, config/ and its settings, and restarts the stack on it. Only a clean, pushed tree
+# compose.yaml and its settings, and restarts the stack on it. Only a clean, pushed tree
 # ships, so the server never runs code that is not in the repository. The
 # last few images stay on the server, so a rollback is one command and no
 # build. Its database stays on the server.
@@ -73,10 +73,9 @@ aarch64 | arm64) platform=linux/arm64 ;;
 esac
 
 docker buildx build --platform "$platform" --build-arg "COMMIT=$commit" --tag "$image" --load .
-ssh "$host" "mkdir -p $dir/config && sudo install -d -o 65532 -g 65532 $dir/data"
+ssh "$host" "mkdir -p $dir"
 docker save "$image" | gzip | ssh "$host" 'gunzip | docker load --quiet'
 scp -q compose.yaml "$host:$dir/compose.yaml"
-scp -qr config/. "$host:$dir/config/"
 ssh "$host" "umask 077 && cat >$dir/.env" <<<"$settings"
 ssh "$host" "docker network inspect candylario >/dev/null 2>&1 || docker network create candylario >/dev/null"
 switch "$image"

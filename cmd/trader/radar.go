@@ -74,7 +74,7 @@ func quiet(err error) error {
 	return err
 }
 
-// startRadar runs the radar beside the agents and keeps its alerts for the
+// startRadar runs the radar beside the engine API and keeps its alerts for the
 // API. HYPERLIQUID_URL picks the exchange; the live one by default. A
 // failure ends only that run; the radar starts again a minute later.
 func startRadar(ctx context.Context, e env, logf func(string, ...any)) *radar.Log {

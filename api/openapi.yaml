@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: Trader engine API
-  version: 1.0.0
+  version: 2.0.0
   description: |
-    The app's only way into the engine. The app manages accounts and
-    payments; the engine runs agents, keeps users' keys in its vault and
-    enforces each tenant's plan.
+    The way into the engine for the app and the notifier. The app manages
+    accounts; the engine keeps each account's agent wallet in its vault,
+    places its trades on Hyperliquid and runs the radar.
 
     Every request except /v1/health and /v1/openapi.yaml needs
     `Authorization: Bearer <ENGINE_API_TOKEN>`.
@@ -13,16 +13,13 @@ info:
     Creates take an optional client-chosen `id` (a UUID). Retrying with the
     same id returns what the first request created, with status 200 instead
     of 201, so a request that timed out can safely be sent again.
-
-    Text written by the model or taken from news (ratings' rationales,
-    summaries, headlines in events) is untrusted. Show it as plain text.
 security:
   - token: []
 paths:
   /v1/health:
     get:
       summary: Whether the engine can work, for an uptime monitor
-      description: 200 when the database answers and every agent that should run does. 503 while the database is down, or while an agent has failed to run for ten minutes or more; such agents are listed.
+      description: 200 when the database answers, 503 when it does not.
       security: []
       responses:
         "200":
@@ -30,17 +27,7 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Health"}
-        "503":
-          description: Agents are down (a Health), or the database is (an error)
-          content:
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: "#/components/schemas/Health"
-                  - type: object
-                    required: [error]
-                    properties:
-                      error: {$ref: "#/components/schemas/Error"}
+        "503": {$ref: "#/components/responses/Error"}
   /v1/openapi.yaml:
     get:
       summary: This document
@@ -73,255 +60,9 @@ paths:
         "404": {$ref: "#/components/responses/Error"}
     delete:
       summary: Close a tenant for good
-      description: Its agents stop, every key is revoked and its sealed secret erased, and the tenant keeps its id and history but not its name. A closed tenant takes no new keys, agents or plans. Closing twice changes nothing more.
+      description: Its wallet key is revoked and erased, and the tenant keeps its id but not its name. A closed tenant gets no new wallet and places no trades. Closing twice changes nothing more.
       responses:
-        "200":
-          description: The agents that stopped
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Closed"}
-        "404": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/plan:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-    put:
-      summary: Replace a tenant's plan
-      description: Active agents the new plan does not allow stop. When more agents are active than it allows, the newest stop.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/Plan"}
-      responses:
-        "200":
-          description: The plan and the agents it stopped
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/PlanChange"}
-        "404": {$ref: "#/components/responses/Error"}
-        "422": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/keys:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-    post:
-      summary: Store a key in the vault
-      description: The key is tried before it is stored. An Anthropic key must reach the engine's model; a Binance key must read its account where it trades, and a live one must not be able to withdraw.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/NewKey"}
-      responses:
-        "201": {$ref: "#/components/responses/Key"}
-        "200": {$ref: "#/components/responses/Key"}
-        "400": {$ref: "#/components/responses/Error"}
-        "404": {$ref: "#/components/responses/Error"}
-        "422": {$ref: "#/components/responses/Error"}
-    get:
-      summary: List a tenant's keys
-      responses:
-        "200":
-          description: Keys, without their secrets
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/KeyList"}
-        "404": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/keys/{key}:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/key"
-    delete:
-      summary: Revoke a key
-      description: Agents that used it restart without it, or stop if it was their Anthropic or Binance key. Revoking twice does nothing.
-      responses:
-        "200":
-          description: The agents that stopped
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Revoked"}
-        "404": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-    post:
-      summary: Create an agent, stopped
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/NewAgent"}
-      responses:
-        "201": {$ref: "#/components/responses/Agent"}
-        "200": {$ref: "#/components/responses/Agent"}
-        "400": {$ref: "#/components/responses/Error"}
-        "404": {$ref: "#/components/responses/Error"}
-        "422": {$ref: "#/components/responses/Error"}
-    get:
-      summary: List a tenant's agents
-      responses:
-        "200":
-          description: Agents
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/AgentList"}
-        "404": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-    get:
-      summary: Get an agent
-      responses:
-        "200": {$ref: "#/components/responses/Agent"}
-        "404": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}/config:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-    get:
-      summary: Get a version of an agent's config
-      parameters:
-        - name: version
-          in: query
-          description: The version to read; the current one when left out.
-          schema: {type: integer, minimum: 1}
-      responses:
-        "200": {$ref: "#/components/responses/Config"}
-        "404": {$ref: "#/components/responses/Error"}
-    put:
-      summary: Store a new version of an agent's config
-      description: Versions never change once stored. A running agent restarts on the new one within half a minute.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/AgentConfig"}
-      responses:
-        "200": {$ref: "#/components/responses/Config"}
-        "400": {$ref: "#/components/responses/Error"}
-        "404": {$ref: "#/components/responses/Error"}
-        "422": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}/keys/{key}:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-      - $ref: "#/components/parameters/key"
-    put:
-      summary: Make an agent use a key
-      description: Replaces the agent's key of the same kind. A Binance key serves one agent only. A running agent restarts with the new key.
-      responses:
-        "200": {$ref: "#/components/responses/Agent"}
-        "404": {$ref: "#/components/responses/Error"}
-        "422": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}/start:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-    post:
-      summary: Start an agent
-      description: Tries the agent's keys in its mode, checks the plan, and marks it active. The engine starts it within half a minute; a new agent first sets aside its capital.
-      responses:
-        "200": {$ref: "#/components/responses/Agent"}
-        "404": {$ref: "#/components/responses/Error"}
-        "422": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}/stop:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-    post:
-      summary: Stop an agent
-      description: Marks it stopped; the engine stops it within half a minute. Holdings are kept. To stop trading but keep watching, send the stop_trading command instead.
-      responses:
-        "200": {$ref: "#/components/responses/Agent"}
-        "404": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}/status:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-    get:
-      summary: An agent's account
-      description: From the running agent, or from its saved account at current prices when it is not running.
-      responses:
-        "200":
-          description: The account
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Status"}
-        "404": {$ref: "#/components/responses/Error"}
-        "409": {$ref: "#/components/responses/Error"}
-        "422": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}/commands:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-    post:
-      summary: Send a command to a running agent
-      description: The commands the chat offers. They are recorded in the audit log, and those that take effect are announced as notices too.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/Command"}
-      responses:
-        "200":
-          description: The agent's answer
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/CommandResult"}
-        "400": {$ref: "#/components/responses/Error"}
-        "404": {$ref: "#/components/responses/Error"}
-        "409": {$ref: "#/components/responses/Error"}
-        "504": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}/events:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-    get:
-      summary: An agent's audit log
-      parameters:
-        - $ref: "#/components/parameters/after"
-        - name: before
-          in: query
-          description: Only events with a lower seq. The page then holds the last `limit` of them, still in order, so the log reads backwards from any point; a before past the end, such as 9223372036854775807, gives the newest events.
-          schema: {type: integer, minimum: 1}
-        - name: limit
-          in: query
-          schema: {type: integer, minimum: 1, maximum: 1000, default: 100}
-        - name: type
-          in: query
-          description: Only events of these types, comma-separated.
-          schema: {type: string, example: equity.hourly}
-      responses:
-        "200":
-          description: Events in order
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/EventList"}
-        "400": {$ref: "#/components/responses/Error"}
-        "404": {$ref: "#/components/responses/Error"}
-  /v1/tenants/{tenant}/agents/{agent}/events/stream:
-    parameters:
-      - $ref: "#/components/parameters/tenant"
-      - $ref: "#/components/parameters/agent"
-    get:
-      summary: An agent's events as they are stored
-      description: |
-        Server-sent events. Each message has `id` (the seq), `event` (the
-        type) and `data` (the Event as JSON). A comment line arrives every
-        15 seconds when nothing else does. Events reach the stream within
-        seconds of being recorded. To resume, reconnect with Last-Event-ID
-        or `after`.
-      parameters:
-        - $ref: "#/components/parameters/after"
-        - name: Last-Event-ID
-          in: header
-          schema: {type: integer, minimum: 0}
-      responses:
-        "200":
-          description: The stream
-          content:
-            text/event-stream: {}
-        "400": {$ref: "#/components/responses/Error"}
+        "200": {$ref: "#/components/responses/Tenant"}
         "404": {$ref: "#/components/responses/Error"}
   /v1/tenants/{tenant}/wallet:
     parameters:
@@ -472,27 +213,17 @@ components:
     token:
       type: http
       scheme: bearer
-      description: ENGINE_API_TOKEN opens every route. ENGINE_NOTIFIER_TOKEN, the notifier's, opens only a tenant's agent list, an agent's status, its commands and its event stream; elsewhere it gets 403 forbidden.
+      description: ENGINE_API_TOKEN opens every route. ENGINE_NOTIFIER_TOKEN, the notifier's, opens only the radar and a tenant's trades; elsewhere it gets 403 forbidden.
   parameters:
     tenant:
       name: tenant
       in: path
       required: true
       schema: {type: string, format: uuid}
-    agent:
-      name: agent
-      in: path
-      required: true
-      schema: {type: string, format: uuid}
-    key:
-      name: key
-      in: path
-      required: true
-      schema: {type: string, format: uuid}
     after:
       name: after
       in: query
-      description: Only events with a higher seq.
+      description: Only alerts with a higher seq.
       schema: {type: integer, minimum: 0, default: 0}
   responses:
     Error:
@@ -509,21 +240,6 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Tenant"}
-    Key:
-      description: The key, without its secret
-      content:
-        application/json:
-          schema: {$ref: "#/components/schemas/Key"}
-    Agent:
-      description: The agent
-      content:
-        application/json:
-          schema: {$ref: "#/components/schemas/Agent"}
-    Config:
-      description: A config version
-      content:
-        application/json:
-          schema: {$ref: "#/components/schemas/Config"}
   schemas:
     NewTrade:
       type: object
@@ -702,270 +418,26 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthorized, forbidden, not_found, conflict, not_running, no_account, refused, timeout, internal]
+          enum: [bad_request, unauthorized, forbidden, not_found, conflict, refused, radar_off, internal]
         message:
           type: string
-          description: Safe to show to the user for refused, not_running and no_account.
+          description: Safe to show to the user for refused.
     Health:
       type: object
-      required: [ok, agents_down]
+      required: [ok]
       properties:
         ok: {type: boolean}
         commit: {type: string, description: The source commit the engine was built from, when known.}
-        agents_down:
-          type: array
-          description: Agents that should run but have failed for ten minutes or more.
-          items: {$ref: "#/components/schemas/AgentDown"}
-    AgentDown:
-      type: object
-      required: [tenant_id, agent_id, since, error]
-      properties:
-        tenant_id: {type: string, format: uuid}
-        agent_id: {type: string, format: uuid}
-        since: {type: string, format: date-time, description: When the agent first failed.}
-        error: {type: string, description: The last error; not meant for the user.}
-    Plan:
-      type: object
-      description: What a tenant's subscription allows.
-      required: [symbols, max_agents, min_decision_interval_hours, max_event_decisions_per_day, live]
-      properties:
-        symbols:
-          type: array
-          items: {type: string, example: BTCUSDT}
-        max_agents: {type: integer, minimum: 0}
-        min_decision_interval_hours: {type: number, minimum: 0}
-        max_event_decisions_per_day: {type: integer, minimum: 0}
-        live: {type: boolean, description: Whether agents may trade real money.}
-        models:
-          type: array
-          description: Models agents may use; any when empty.
-          items: {type: string}
     NewTenant:
       type: object
-      required: [name, plan]
+      required: [name]
       properties:
         id: {type: string, format: uuid}
         name: {type: string}
-        plan: {$ref: "#/components/schemas/Plan"}
     Tenant:
       type: object
-      required: [id, name, status, plan]
+      required: [id, name, status]
       properties:
         id: {type: string, format: uuid}
         name: {type: string}
-        status: {type: string, enum: [active, suspended]}
-        plan: {$ref: "#/components/schemas/Plan"}
-    Stopped:
-      type: object
-      required: [agent_id, reason]
-      properties:
-        agent_id: {type: string, format: uuid}
-        reason: {type: string}
-    PlanChange:
-      type: object
-      required: [plan, stopped]
-      properties:
-        plan: {$ref: "#/components/schemas/Plan"}
-        stopped:
-          type: array
-          items: {$ref: "#/components/schemas/Stopped"}
-    NewKey:
-      type: object
-      required: [kind, secret]
-      properties:
-        id: {type: string, format: uuid}
-        kind: {type: string, enum: [anthropic, binance]}
-        label: {type: string}
-        mode:
-          type: string
-          enum: [testnet, live]
-          description: Where a Binance key trades. Required for Binance keys.
-        secret:
-          type: object
-          description: '{"key"} for Anthropic, {"key", "secret"} for Binance.'
-    Key:
-      type: object
-      required: [id, kind, label, hint, created_at, revoked]
-      properties:
-        id: {type: string, format: uuid}
-        kind: {type: string, enum: [anthropic, binance]}
-        label: {type: string}
-        hint: {type: string, description: The secret's last characters.}
-        created_at: {type: string, format: date-time}
-        revoked: {type: boolean}
-    KeyList:
-      type: object
-      required: [keys]
-      properties:
-        keys:
-          type: array
-          items: {$ref: "#/components/schemas/Key"}
-    Revoked:
-      type: object
-      required: [stopped]
-      properties:
-        stopped:
-          type: array
-          items: {$ref: "#/components/schemas/Stopped"}
-    Closed:
-      type: object
-      required: [stopped]
-      properties:
-        stopped:
-          type: array
-          items: {$ref: "#/components/schemas/Stopped"}
-    AgentConfig:
-      type: object
-      description: The agent's settings, as in config/agent.json without model and data_dir, which the engine sets. Unknown fields are refused.
-      additionalProperties: true
-    NewAgent:
-      type: object
-      required: [name, mode, config]
-      properties:
-        id: {type: string, format: uuid}
-        name: {type: string}
-        mode: {type: string, enum: [testnet, live]}
-        config: {$ref: "#/components/schemas/AgentConfig"}
-        keys:
-          type: array
-          description: IDs of the keys the agent uses, one per kind.
-          items: {type: string, format: uuid}
-    Agent:
-      type: object
-      required: [id, name, mode, status, running, version, keys]
-      properties:
-        id: {type: string, format: uuid}
-        name: {type: string}
-        mode: {type: string, enum: [testnet, live]}
-        status: {type: string, enum: [active, stopped], description: What the user asked for.}
-        running: {type: boolean, description: Whether the engine runs it right now.}
-        version: {type: integer, description: The current config version.}
-        keys:
-          type: object
-          description: The key ID the agent uses for each kind.
-          additionalProperties: {type: string, format: uuid}
-    AgentList:
-      type: object
-      required: [agents]
-      properties:
-        agents:
-          type: array
-          items: {$ref: "#/components/schemas/Agent"}
-    Config:
-      type: object
-      required: [version, config]
-      properties:
-        version: {type: integer}
-        config: {$ref: "#/components/schemas/AgentConfig"}
-    Command:
-      type: object
-      required: [command]
-      properties:
-        command:
-          type: string
-          enum: [decide, stop_trading, resume_trading, sell_all]
-          description: decide makes a decision now; stop_trading keeps holdings and stops new trades; resume_trading trades again; sell_all sells everything and stops trading.
-        via:
-          type: string
-          enum: [app, telegram]
-          default: app
-          description: Where the user sent it, for the audit log.
-    CommandResult:
-      type: object
-      required: [ok, message]
-      properties:
-        ok: {type: boolean, description: False when the agent did not act, such as a decision while trading is stopped.}
-        message: {type: string}
-    Position:
-      type: object
-      required: [symbol, coin, qty, value, weight]
-      properties:
-        symbol: {type: string}
-        coin: {type: string}
-        qty: {type: string, description: Decimal.}
-        value: {type: string, description: Decimal, in the quote asset.}
-        weight: {type: number, description: Share of equity.}
-    Rating:
-      type: object
-      required: [rating, confidence, rationale]
-      properties:
-        rating: {type: string, enum: [strong_buy, buy, hold, sell, strong_sell]}
-        confidence: {type: string}
-        rationale: {type: string, description: Written by the model; untrusted.}
-    Decision:
-      type: object
-      required: [id, at, kind, trigger, summary, ratings, cost_usd, abstained]
-      properties:
-        id: {type: integer}
-        at: {type: string, format: date-time}
-        kind: {type: string, enum: [scheduled, move, news, manual]}
-        trigger: {type: string}
-        summary: {type: string, description: Written by the model; untrusted.}
-        ratings:
-          type: object
-          additionalProperties: {$ref: "#/components/schemas/Rating"}
-        cost_usd: {type: number}
-        abstained: {type: boolean}
-    AISpend:
-      type: object
-      required: [today_usd, month_usd, daily_limit_usd, monthly_limit_usd]
-      properties:
-        today_usd: {type: number}
-        month_usd: {type: number}
-        daily_limit_usd: {type: number}
-        monthly_limit_usd: {type: number}
-    Status:
-      type: object
-      description: Amounts are decimal strings in the quote asset.
-      required: [agent_id, name, mode, running, trading, capital, equity, buy_and_hold, cash, fees, positions, trades, pending_orders, graded_calls, right_calls, at, message]
-      properties:
-        agent_id: {type: string, format: uuid}
-        name: {type: string}
-        mode: {type: string, enum: [testnet, live]}
-        running: {type: boolean}
-        trading: {type: string, enum: ["on", stopped, selling]}
-        stop_reason: {type: string}
-        capital: {type: string}
-        equity: {type: string}
-        buy_and_hold: {type: string, description: What the capital would be worth bought once and held.}
-        cash: {type: string}
-        fees: {type: string}
-        positions:
-          type: array
-          items: {$ref: "#/components/schemas/Position"}
-        last_decision: {$ref: "#/components/schemas/Decision"}
-        next_decision: {type: string, format: date-time, description: The next scheduled decision, while trading is on.}
-        trades: {type: integer}
-        pending_orders: {type: integer}
-        graded_calls: {type: integer, description: Buy and sell calls graded so far.}
-        right_calls: {type: integer}
-        ai_spend: {$ref: "#/components/schemas/AISpend"}
-        at: {type: string, format: date-time}
-        message: {type: string, description: The same account as a short text, as a chat shows it.}
-    Event:
-      type: object
-      required: [seq, id, type, at, payload, hash]
-      properties:
-        seq: {type: integer, description: Position in the agent's log, from 1.}
-        id: {type: string, format: uuid}
-        type:
-          type: string
-          description: |
-            account.created, agent.started, agent.stopped, decision.started,
-            model.call, decision.finished, decision.failed, order.intent,
-            order.result, trade.booked, trading.stopped, trading.resumed,
-            command.received, equity.hourly, call.graded, lesson.recorded,
-            news.alert and notice. A notice is a message for the user, {"text", "alert"},
-            where alert names the kind of warning. New types may be added;
-            ignore unknown ones.
-        at: {type: string, format: date-time}
-        payload: {type: object, description: The event's details; fields are only ever added.}
-        hash: {type: string, description: Hex SHA-256 over the event and prev_hash.}
-        prev_hash: {type: string}
-    EventList:
-      type: object
-      required: [events]
-      properties:
-        events:
-          type: array
-          items: {$ref: "#/components/schemas/Event"}
+        status: {type: string, enum: [active, suspended, closed]}

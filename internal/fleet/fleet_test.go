@@ -2,26 +2,11 @@ package fleet
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
 
-	"github.com/candylario/trader/internal/agent"
-	"github.com/candylario/trader/internal/analyst"
-	"github.com/candylario/trader/internal/audit"
-	"github.com/candylario/trader/internal/binance"
 	"github.com/candylario/trader/internal/pg"
 	"github.com/candylario/trader/internal/testkit"
 	"github.com/candylario/trader/internal/vault"
@@ -42,447 +27,53 @@ func service(t *testing.T) *Service {
 	t.Cleanup(store.Close)
 	master, _ := vault.NewMasterKey()
 	v, _ := vault.New(master)
-	return &Service{Store: store, Vault: v, DataDir: t.TempDir(), Model: "test-model"}
+	return &Service{Store: store, Vault: v}
 }
 
-var plan = Entitlements{Symbols: []string{"BTCUSDT", "ETHUSDT"}, MaxAgents: 2, MinDecisionIntervalHours: 1, MaxEventDecisionsPerDay: 8}
-
-func agentConfig(t *testing.T, edit func(m map[string]any)) []byte {
-	raw, _ := json.Marshal(testkit.Config("ignored"))
-	var m map[string]any
-	json.Unmarshal(raw, &m)
-	delete(m, "data_dir")
-	delete(m, "model")
-	if edit != nil {
-		edit(m)
-	}
-	out, _ := json.Marshal(m)
-	return out
-}
-
-func TestTierLimitsAndKeysAreEnforced(t *testing.T) {
+func TestATenantIsMadeOnceAndClosedForGood(t *testing.T) {
 	s := service(t)
 	ctx := context.Background()
-	tn, _, err := s.AddTenant(ctx, uuid.Nil, "alice", Entitlements{Symbols: []string{"BTCUSDT"}, MaxAgents: 1, MinDecisionIntervalHours: 4, MaxEventDecisionsPerDay: 8})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tenant := tn.ID
-	btcOnly := func(m map[string]any) { m["symbols"] = []string{"BTCUSDT"} }
-	for name, tc := range map[string]struct {
-		mode string
-		edit func(map[string]any)
-	}{
-		"a coin outside the plan":   {"testnet", nil},
-		"live without live trading": {"live", btcOnly},
-		"deciding too often":        {"testnet", func(m map[string]any) { btcOnly(m); m["decision_interval_hours"] = 1 }},
-		"an unknown field":          {"testnet", func(m map[string]any) { btcOnly(m); m["leverage"] = 10 }},
-	} {
-		_, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: name, Mode: tc.mode, Config: agentConfig(t, tc.edit), By: "test"})
-		if refused := new(Refused); !errors.As(err, &refused) {
-			t.Fatalf("%s must be refused: %v", name, err)
-		}
+	var refused *Refused
+	if _, _, err := s.AddTenant(ctx, uuid.Nil, " "); !errors.As(err, &refused) {
+		t.Fatalf("a tenant needs a name: %v", err)
 	}
 	id := uuid.Must(uuid.NewV7())
-	row, created, err := s.AddAgent(ctx, tenant, NewAgent{ID: id, Name: "btc", Mode: "testnet", Config: agentConfig(t, btcOnly), By: "test"})
-	if err != nil || !created || row.ID != id || row.Version != 1 {
-		t.Fatalf("add: %+v %v %v", row, created, err)
+	tn, isNew, err := s.AddTenant(ctx, id, "alice@example.com")
+	if err != nil || !isNew || tn.ID != id || tn.Status != "active" {
+		t.Fatalf("add: %+v %v %v", tn, isNew, err)
 	}
-	if again, created, err := s.AddAgent(ctx, tenant, NewAgent{ID: id, Name: "btc", Mode: "testnet", Config: agentConfig(t, btcOnly), By: "test"}); err != nil || created || again.ID != id {
-		t.Fatalf("a retry returns the same agent: %+v %v %v", again, created, err)
+	if again, isNew, err := s.AddTenant(ctx, id, "someone else"); err != nil || isNew || again.Name != "alice@example.com" {
+		t.Fatalf("a retry returns the first tenant: %+v %v %v", again, isNew, err)
 	}
-	if _, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: "second", Mode: "testnet", Config: agentConfig(t, btcOnly), By: "test"}); err == nil {
-		t.Fatal("the plan allows one agent")
-	}
-	if err := s.Start(ctx, tenant, id); err == nil {
-		t.Fatal("an agent cannot start without its keys")
-	}
-	for kind, raw := range map[string]string{KindAnthropic: `{"key":"k","secret":"s"}`, KindBinance: `{"key":"k"}`, "telegram": `{"token":"t"}`} {
-		if _, _, err := s.AddKey(ctx, tenant, NewKey{Kind: kind, Label: "bad", Mode: "testnet", Secret: []byte(raw)}); err == nil {
-			t.Fatalf("a malformed %s key must be refused", kind)
-		}
-	}
-	if _, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Secret: []byte(`{"key":"k","secret":"s"}`)}); err == nil {
-		t.Fatal("an exchange key must say where it trades")
-	}
-	keyID := uuid.Must(uuid.NewV7())
-	c, created, err := s.AddKey(ctx, tenant, NewKey{ID: keyID, Kind: KindBinance, Label: "main", Mode: "testnet", Secret: []byte(`{"key":"ABCDEFGHwxyz","secret":"top-secret"}`)})
-	if err != nil || !created || c.Hint != "…wxyz" || c.CreatedAt.IsZero() || strings.Contains(string(c.Sealed.Ciphertext), "top-secret") {
-		t.Fatalf("stored key: %+v %v", c, err)
-	}
-	if again, created, err := s.AddKey(ctx, tenant, NewKey{ID: keyID, Kind: KindBinance, Mode: "testnet", Secret: []byte(`{"key":"other","secret":"other"}`)}); err != nil || created || again.Hint != "…wxyz" {
-		t.Fatalf("a retry returns the key stored first: %+v %v", again, err)
-	}
-	s.CheckKey = func(ctx context.Context, kind, mode string, k Keys) error { return errors.New("invalid API key") }
-	if _, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindAnthropic, Secret: []byte(`{"key":"sk-bad"}`)}); err == nil || !strings.Contains(err.Error(), "invalid API key") {
-		t.Fatalf("a key that does not work is refused: %v", err)
-	}
-	if again, created, err := s.AddTenant(ctx, tenant, "other", plan); err != nil || created || again.Name != "alice" {
-		t.Fatalf("a retried tenant is returned unchanged: %+v %v", again, err)
-	}
-	if _, _, err := s.AddTenant(ctx, uuid.Nil, "bad", Entitlements{Symbols: []string{"btc/usdt"}}); err == nil {
-		t.Fatal("a malformed plan is refused")
-	}
-}
-
-func TestAPlanDowngradeStopsTheAgentsItNoLongerAllows(t *testing.T) {
-	s := service(t)
-	ctx := context.Background()
-	tn, _, _ := s.AddTenant(ctx, uuid.Nil, "alice", plan)
-	tenant := tn.ID
-	model, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindAnthropic, Label: "main", Secret: []byte(`{"key":"sk"}`)})
-	var agents []uuid.UUID
-	for i, name := range []string{"first", "second"} {
-		ex, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: name, Mode: "testnet", Secret: []byte(fmt.Sprintf(`{"key":"k%d","secret":"s"}`, i))})
-		row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: name, Mode: "testnet", Config: agentConfig(t, nil), Keys: []uuid.UUID{model.ID, ex.ID}, By: "test"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.Start(ctx, tenant, row.ID); err != nil {
-			t.Fatal(err)
-		}
-		agents = append(agents, row.ID)
-	}
-	fewer := plan
-	fewer.MaxAgents = 1
-	stopped, err := s.SetEntitlements(ctx, tenant, fewer)
-	if err != nil || len(stopped) != 1 || stopped[agents[1]] == "" {
-		t.Fatalf("the newest agent over the limit stops: %v %v", stopped, err)
-	}
-	if err := s.Start(ctx, tenant, agents[1]); err == nil {
-		t.Fatal("an agent over the limit cannot start again")
-	}
-	btcOnly := fewer
-	btcOnly.Symbols = []string{"BTCUSDT"}
-	if stopped, _ := s.SetEntitlements(ctx, tenant, btcOnly); !strings.Contains(stopped[agents[0]], "ETHUSDT") {
-		t.Fatalf("an agent trading a coin the plan dropped stops: %v", stopped)
-	}
-	if run, _ := s.Store.Runnable(ctx); len(run) != 0 {
-		t.Fatalf("nothing may run: %+v", run)
-	}
-}
-
-type tenantRig struct {
-	ex     *testkit.Binance
-	exURL  string
-	api    *testkit.API
-	apiURL string
-}
-
-func TestTwoTenantsTradeSideBySideWithTheirOwnKeys(t *testing.T) {
-	s := service(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	now := func() time.Time { return testkit.At(t, "2026-10-25 12:00") }
-	rigs := map[uuid.UUID]*tenantRig{}
-	var builds atomic.Int32
-	for _, name := range []string{"alice", "bob"} {
-		r := &tenantRig{ex: testkit.NewBinance(now), api: &testkit.API{WantKey: "sk-" + name}}
-		r.ex.APIKey, r.ex.APISecret = "key-"+name, "secret-"+name
-		r.api.Script = []func(string) (int, any){testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, testkit.CitePrices)}
-		r.exURL, r.apiURL = r.ex.Server(t).URL, r.api.Server(t).URL
-		tn, _, err := s.AddTenant(ctx, uuid.Nil, name, plan)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tenant := tn.ID
-		row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: "btc-eth", Mode: "testnet", Config: agentConfig(t, nil), By: "test"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		agentID := row.ID
-		for kind, raw := range map[string]string{KindAnthropic: `{"key":"sk-` + name + `"}`, KindBinance: `{"key":"key-` + name + `","secret":"secret-` + name + `"}`} {
-			c, _, err := s.AddKey(ctx, tenant, NewKey{Kind: kind, Label: "main", Mode: "testnet", Secret: []byte(raw)})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := s.AttachKey(ctx, tenant, agentID, c.ID); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := s.Start(ctx, tenant, agentID); err != nil {
-			t.Fatal(err)
-		}
-		rigs[agentID] = r
-	}
-	sup := &Supervisor{Service: s, Every: 50 * time.Millisecond, Logf: t.Logf, Build: func(spec Spec) (*agent.Engine, error) {
-		builds.Add(1)
-		r := rigs[spec.Agent]
-		return &agent.Engine{
-			Config:   spec.Config,
-			Exchange: &binance.Client{HTTP: http.DefaultClient, BaseURL: r.exURL, DataURL: r.exURL, Key: spec.Keys.BinanceKey, Secret: spec.Keys.BinanceSecret, Now: now},
-			Analyst: &analyst.Analyst{Config: spec.Config, Client: anthropic.NewClient(option.WithAPIKey(spec.Keys.Anthropic), option.WithBaseURL(r.apiURL)),
-				Budget: &analyst.Budget{Path: filepath.Join(spec.Config.DataDir, "budget.json"), DailyUSD: spec.Config.MaxDailyLLMUSD, MonthlyUSD: spec.Config.MaxMonthlyLLMUSD, Now: now},
-				Sleep:  func(context.Context, time.Duration) error { return nil }},
-			Now: now,
-		}, nil
-	}}
-	done := make(chan struct{})
-	go func() { sup.Run(ctx); close(done) }()
-	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		ready := 0
-		for _, r := range rigs {
-			if len(r.ex.OrderList()) == 1 {
-				ready++
-			}
-		}
-		if ready == len(rigs) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("both agents should have bought BTC with their own keys")
-		}
-	}
-	var mu sync.Mutex
-	seen := map[string]bool{}
-	for id, r := range rigs {
-		o := r.ex.OrderList()[0]
-		mu.Lock()
-		if seen[o.ClientID] || o.Symbol != "BTCUSDT" {
-			t.Fatalf("unexpected order %+v", o)
-		}
-		seen[o.ClientID] = true
-		mu.Unlock()
-		if _, err := os.Stat(filepath.Join(s.DataDir, "agents", id.String(), "testnet", "state.json")); err != nil {
-			t.Fatalf("each agent keeps its own account: %v", err)
-		}
-	}
-	cancel()
-	<-done
-}
-
-func TestNewVersionsAndKeysRestartAgentsAndRevokedKeysStopThem(t *testing.T) {
-	s := service(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	now := func() time.Time { return testkit.At(t, "2026-10-25 12:00") }
-	ex := testkit.NewBinance(now)
-	api := &testkit.API{Script: []func(string) (int, any){testkit.SubmitStep(map[string]string{"BTCUSDT": "hold", "ETHUSDT": "hold"}, testkit.CitePrices)}}
-	exURL, apiURL := ex.Server(t).URL, api.Server(t).URL
-	tn, _, _ := s.AddTenant(ctx, uuid.Nil, "alice", plan)
-	tenant := tn.ID
-	row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: "btc-eth", Mode: "testnet", Config: agentConfig(t, nil), By: "test"})
+	w, _, err := s.Wallet(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentID := row.ID
-	keys := map[string]uuid.UUID{}
-	for kind, raw := range map[string]string{KindAnthropic: `{"key":"sk"}`, KindBinance: `{"key":"` + testkit.Key + `","secret":"` + testkit.Secret + `"}`} {
-		c, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: kind, Label: "main", Mode: "testnet", Secret: []byte(raw)})
-		s.AttachKey(ctx, tenant, agentID, c.ID)
-		keys[kind] = c.ID
-	}
-	s.Start(ctx, tenant, agentID)
-	var versions []int
-	var mu sync.Mutex
-	sup := &Supervisor{Service: s, Every: 50 * time.Millisecond, Logf: t.Logf, Build: func(spec Spec) (*agent.Engine, error) {
-		mu.Lock()
-		versions = append(versions, spec.Version)
-		mu.Unlock()
-		return &agent.Engine{Config: spec.Config, Now: now,
-			Exchange: &binance.Client{HTTP: http.DefaultClient, BaseURL: exURL, DataURL: exURL, Key: spec.Keys.BinanceKey, Secret: spec.Keys.BinanceSecret, Now: now},
-			Analyst: &analyst.Analyst{Config: spec.Config, Client: anthropic.NewClient(option.WithAPIKey("sk"), option.WithBaseURL(apiURL)),
-				Budget: &analyst.Budget{Path: filepath.Join(spec.Config.DataDir, "budget.json"), DailyUSD: 5, MonthlyUSD: 50, Now: now}}}, nil
-	}}
-	done := make(chan struct{})
-	go func() { sup.Run(ctx); close(done) }()
-	waitFor := func(what string, ok func() bool) {
-		t.Helper()
-		for deadline := time.Now().Add(10 * time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
-			if time.Now().After(deadline) {
-				t.Fatalf("timed out waiting for %s", what)
-			}
-		}
-	}
-	got := func() []int { mu.Lock(); defer mu.Unlock(); return append([]int(nil), versions...) }
-	waitFor("the first start", func() bool { return len(got()) == 1 })
-	if _, err := s.SetConfig(ctx, tenant, agentID, agentConfig(t, func(m map[string]any) { m["capital_usd"] = 200 }), "test"); err != nil {
-		t.Fatal(err)
-	}
-	waitFor("a restart on version 2", func() bool { v := got(); return len(v) == 2 && v[1] == 2 })
-	other, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: "other", Mode: "testnet", Secret: []byte(`{"key":"` + testkit.Key + `","secret":"` + testkit.Secret + `"}`)})
-	s.AttachKey(ctx, tenant, agentID, other.ID)
-	waitFor("a restart with the new key", func() bool { return len(got()) == 3 })
-	if stopped, err := s.RevokeKey(ctx, tenant, keys[KindAnthropic]); err != nil || len(stopped) != 1 {
-		t.Fatalf("revoking the model key stops its agent: %v %v", stopped, err)
-	}
-	time.Sleep(300 * time.Millisecond)
-	if len(got()) != 3 {
-		t.Fatal("an agent without its model key must not run")
-	}
-	if row, _ := s.Store.Agent(ctx, tenant, agentID); row.Status != pg.StatusStopped {
-		t.Fatalf("status %q", row.Status)
-	}
-	cancel()
-	<-done
-}
+	bob, _, _ := s.AddTenant(ctx, uuid.Nil, "bob@example.com")
 
-func TestClosingATenantStopsItsAgentsAndErasesItsKeys(t *testing.T) {
-	s := service(t)
-	ctx := context.Background()
-	tn, _, _ := s.AddTenant(ctx, uuid.Nil, "alice@example.com", plan)
-	tenant := tn.ID
-	model, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindAnthropic, Label: "main", Secret: []byte(`{"key":"sk-secret"}`)})
-	ex, _, _ := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: "main", Mode: "testnet", Secret: []byte(`{"key":"kkkkwxyz","secret":"s"}`)})
-	row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: "btc-eth", Mode: "testnet", Config: agentConfig(t, nil), Keys: []uuid.UUID{model.ID, ex.ID}, By: "test"})
-	if err != nil {
+	if err := s.CloseTenant(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Start(ctx, tenant, row.ID); err != nil {
-		t.Fatal(err)
-	}
-	bob, _, _ := s.AddTenant(ctx, uuid.Nil, "bob@example.com", plan)
-
-	stopped, err := s.CloseTenant(ctx, tenant)
-	if err != nil || len(stopped) != 1 || stopped[0] != row.ID {
-		t.Fatalf("closing stops the agent: %v %v", stopped, err)
-	}
-	if run, _ := s.Store.Runnable(ctx); len(run) != 0 {
-		t.Fatalf("nothing of a closed tenant may run: %+v", run)
-	}
-	if tn, _ := s.Store.Tenant(ctx, tenant); tn.Status != pg.TenantClosed || tn.Name != "" {
+	if tn, _ := s.Store.Tenant(ctx, id); tn.Status != pg.TenantClosed || tn.Name != "" {
 		t.Fatalf("the tenant keeps no name: %+v", tn)
 	}
-	for _, id := range []uuid.UUID{model.ID, ex.ID} {
-		if c, err := s.Store.Credential(ctx, tenant, id); err != nil || !c.Revoked || c.Hint != "" || len(c.Sealed.Ciphertext) != 0 || len(c.Sealed.WrappedKey) != 0 {
-			t.Fatalf("key %s is not erased: %+v %v", id, c, err)
-		}
+	if c, err := s.Store.Credential(ctx, id, w.ID); err != nil || !c.Revoked || c.Hint != "" || len(c.Sealed.Ciphertext) != 0 || len(c.Sealed.WrappedKey) != 0 {
+		t.Fatalf("the wallet key is not erased: %+v %v", c, err)
 	}
-	refused := new(Refused)
-	if _, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindAnthropic, Secret: []byte(`{"key":"sk-new"}`)}); !errors.As(err, &refused) {
-		t.Fatalf("a closed tenant takes no keys: %v", err)
+	if _, _, err := s.Wallet(ctx, id); !errors.As(err, &refused) {
+		t.Fatalf("a closed tenant gets no new wallet: %v", err)
 	}
-	if err := s.Start(ctx, tenant, row.ID); !errors.As(err, &refused) {
-		t.Fatalf("a closed tenant's agent cannot start: %v", err)
+	if _, err := s.OpenTrade(ctx, id, TradeRequest{Coin: "ETH", Side: "long", USD: 20, Leverage: 1, StopLossPct: 0.1}); !errors.As(err, &refused) {
+		t.Fatalf("a closed tenant places no trades: %v", err)
 	}
-	if _, err := s.SetEntitlements(ctx, tenant, plan); !errors.As(err, &refused) {
-		t.Fatalf("a closed tenant takes no plan: %v", err)
+	if err := s.CloseTenant(ctx, id); err != nil {
+		t.Fatalf("closing twice: %v", err)
 	}
-	if again, err := s.CloseTenant(ctx, tenant); err != nil || len(again) != 0 {
-		t.Fatalf("closing twice: %v %v", again, err)
-	}
-	if _, err := s.CloseTenant(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, pg.ErrNotFound) {
+	if err := s.CloseTenant(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, pg.ErrNotFound) {
 		t.Fatalf("an unknown tenant: %v", err)
 	}
 	if b, _ := s.Store.Tenant(ctx, bob.ID); b.Status != "active" || b.Name != "bob@example.com" {
 		t.Fatalf("another tenant changed: %+v", b)
-	}
-}
-
-// clock is a fake clock tests move.
-type clock struct {
-	mu sync.Mutex
-	at time.Time
-}
-
-func (c *clock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
-
-func (c *clock) advance(d time.Duration) { c.mu.Lock(); c.at = c.at.Add(d); c.mu.Unlock() }
-
-func TestAPanicEndsOnlyThatAgentsRunAndTheFailureIsReported(t *testing.T) {
-	s := service(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	clk := &clock{at: testkit.At(t, "2026-10-25 12:00")}
-	ex := testkit.NewBinance(clk.now)
-	api := &testkit.API{Script: []func(string) (int, any){testkit.SubmitStep(map[string]string{"BTCUSDT": "strong_buy", "ETHUSDT": "hold"}, testkit.CitePrices)}}
-	exURL, apiURL := ex.Server(t).URL, api.Server(t).URL
-	tn, _, err := s.AddTenant(ctx, uuid.Nil, "alice", plan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tenant := tn.ID
-	model, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindAnthropic, Label: "main", Secret: []byte(`{"key":"sk"}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids := map[string]uuid.UUID{}
-	for _, name := range []string{"fine", "broken"} {
-		// An exchange key serves one agent only.
-		venue, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: name, Mode: "testnet", Secret: []byte(`{"key":"` + testkit.Key + `","secret":"` + testkit.Secret + `"}`)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: name, Mode: "testnet", Config: agentConfig(t, nil), Keys: []uuid.UUID{model.ID, venue.ID}, By: "test"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.Start(ctx, tenant, row.ID); err != nil {
-			t.Fatal(err)
-		}
-		ids[name] = row.ID
-	}
-	var ships atomic.Int32
-	sup := &Supervisor{Service: s, Every: 20 * time.Millisecond, Logf: t.Logf, Now: clk.now,
-		Build: func(spec Spec) (*agent.Engine, error) {
-			if spec.Name == "broken" {
-				panic("boom")
-			}
-			return &agent.Engine{
-				Config:   spec.Config,
-				Exchange: &binance.Client{HTTP: http.DefaultClient, BaseURL: exURL, DataURL: exURL, Key: spec.Keys.BinanceKey, Secret: spec.Keys.BinanceSecret, Now: clk.now},
-				Analyst: &analyst.Analyst{Config: spec.Config, Client: anthropic.NewClient(option.WithAPIKey(spec.Keys.Anthropic), option.WithBaseURL(apiURL)),
-					Budget: &analyst.Budget{Path: filepath.Join(spec.Config.DataDir, "budget.json"), DailyUSD: spec.Config.MaxDailyLLMUSD, MonthlyUSD: spec.Config.MaxMonthlyLLMUSD, Now: clk.now},
-					Sleep:  func(context.Context, time.Duration) error { return nil }},
-				Now: clk.now,
-			}, nil
-		},
-		// The shipper panics too: the agent must trade on without it.
-		Ship: func(ctx context.Context, spec Spec) { ships.Add(1); panic("ship") },
-	}
-	done := make(chan struct{})
-	go func() { sup.Run(ctx); close(done) }()
-	wait := func(what string, ok func() bool) {
-		t.Helper()
-		for deadline := time.Now().Add(15 * time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
-			if time.Now().After(deadline) {
-				t.Fatal(what)
-			}
-		}
-	}
-	wait("the fine agent should trade despite the other's panic", func() bool { return len(ex.OrderList()) == 1 && sup.Running(tenant, ids["fine"]) })
-	wait("the broken agent's failure should be on record", func() bool { return len(sup.Down(0)) == 1 })
-	f := sup.Down(0)[0]
-	if f.Agent != ids["broken"] || f.Tenant != tenant || f.Runs != 1 || !strings.Contains(f.Error, "panic: boom") || !f.Since.Equal(clk.now()) {
-		t.Fatalf("failure %+v", f)
-	}
-	if len(sup.Down(10*time.Minute)) != 0 || ships.Load() != 1 {
-		t.Fatalf("a fresh failure is not yet reported, and the shipper ran once: %d ships", ships.Load())
-	}
-	// A minute later the agent is tried again; after ten, the health check reports it.
-	clk.advance(10 * time.Minute)
-	wait("the broken agent should be retried", func() bool { return sup.Down(0)[0].Runs == 2 })
-	if down := sup.Down(10 * time.Minute); len(down) != 1 || down[0].Agent != ids["broken"] {
-		t.Fatalf("after ten minutes the failure is reported: %+v", down)
-	}
-	if !sup.Running(tenant, ids["fine"]) {
-		t.Fatal("the fine agent runs on")
-	}
-	// Stopping the broken agent clears its failure.
-	if err := s.Stop(ctx, tenant, ids["broken"]); err != nil {
-		t.Fatal(err)
-	}
-	wait("a stopped agent is no failure", func() bool { return len(sup.Down(0)) == 0 })
-	// A shutdown stops the agent as the engine's own doing: on record, but
-	// not announced.
-	cancel()
-	<-done
-	events, err := audit.ReadAfter(filepath.Join(s.DataDir, "agents", ids["fine"].String(), "testnet", "events"), 0, 1000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stopped := false
-	for _, e := range events {
-		body := string(e.Body)
-		switch {
-		case e.Type == "agent.stopped" && strings.Contains(body, `"by":"shutdown"`):
-			stopped = true
-		case e.Type == "notice" && strings.Contains(body, "Stopped."):
-			t.Fatalf("a shutdown must not message the user: %s", body)
-		}
-	}
-	if !stopped {
-		t.Fatal("the shutdown must be on record as the engine's own stop")
 	}
 }
 
@@ -492,31 +83,27 @@ func TestRotatingTheMasterKeyRewrapsStoredKeys(t *testing.T) {
 	k1, _ := vault.NewMasterKey()
 	k2, _ := vault.NewMasterKey()
 	s.Vault, _ = vault.New(k1)
-	tn, _, err := s.AddTenant(ctx, uuid.Nil, "alice", plan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tenant := tn.ID
-	var keys []uuid.UUID
-	for kind, raw := range map[string]string{KindAnthropic: `{"key":"sk-alice"}`, KindBinance: `{"key":"venue-key","secret":"venue-secret"}`} {
-		c, _, err := s.AddKey(ctx, tenant, NewKey{Kind: kind, Label: "main", Mode: "testnet", Secret: []byte(raw)})
+	wallets := map[uuid.UUID]Wallet{}
+	for _, name := range []string{"alice", "bob", "carol"} {
+		tn, _, err := s.AddTenant(ctx, uuid.Nil, name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		keys = append(keys, c.ID)
-	}
-	gone, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: "old", Mode: "testnet", Secret: []byte(`{"key":"x","secret":"y"}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.RevokeKey(ctx, tenant, gone.ID); err != nil {
-		t.Fatal(err)
-	}
-	row, _, err := s.AddAgent(ctx, tenant, NewAgent{Name: "btc-eth", Mode: "testnet", Config: agentConfig(t, nil), Keys: keys, By: "test"})
-	if err != nil {
-		t.Fatal(err)
+		w, _, err := s.Wallet(ctx, tn.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "carol" {
+			// A closed account's key is erased and left alone.
+			if err := s.CloseTenant(ctx, tn.ID); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		wallets[tn.ID] = w
 	}
 	// Both keys loaded: the rewrap moves every key in use to version 2.
+	var err error
 	if s.Vault, err = vault.New("2:"+k2, k1); err != nil {
 		t.Fatal(err)
 	}
@@ -526,18 +113,22 @@ func TestRotatingTheMasterKeyRewrapsStoredKeys(t *testing.T) {
 	if n, err := s.Rewrap(ctx); err != nil || n != 0 {
 		t.Fatalf("a second rewrap finds nothing: %d %v", n, err)
 	}
-	// The old key dropped: the agent's keys still open, the revoked one stays under version 1.
+	// The old key dropped: the wallets still open.
 	if s.Vault, err = vault.New("2:" + k2); err != nil {
 		t.Fatal(err)
 	}
-	spec, err := s.Spec(ctx, tenant, row.ID)
-	if err != nil || spec.Keys.Anthropic != "sk-alice" || spec.Keys.BinanceKey != "venue-key" || spec.Keys.BinanceSecret != "venue-secret" {
-		t.Fatalf("keys after the rotation: %+v %v", spec.Keys, err)
+	for tenant, w := range wallets {
+		got, signer, err := s.WalletSigner(ctx, tenant)
+		if err != nil || got.Agent != w.Agent || signer.Address() != w.Agent {
+			t.Fatalf("wallet after the rotation: %+v %v", got, err)
+		}
 	}
-	if c, err := s.Store.Credential(ctx, tenant, gone.ID); err != nil || c.Sealed.MasterVersion != 1 {
-		t.Fatalf("a revoked key is left alone: %+v %v", c.Sealed.MasterVersion, err)
+	tn, _, _ := s.AddTenant(ctx, uuid.Nil, "dave")
+	w, _, err := s.Wallet(ctx, tn.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if c, _, err := s.AddKey(ctx, tenant, NewKey{Kind: KindBinance, Label: "new", Mode: "testnet", Secret: []byte(`{"key":"a","secret":"b"}`)}); err != nil || c.Sealed.MasterVersion != 2 {
-		t.Fatalf("new keys seal under the current version: %+v %v", c, err)
+	if c, err := s.Store.Credential(ctx, tn.ID, w.ID); err != nil || c.Sealed.MasterVersion != 2 {
+		t.Fatalf("new keys seal under the current version: %+v %v", c.Sealed.MasterVersion, err)
 	}
 }
