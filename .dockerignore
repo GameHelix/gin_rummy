@@ -1,7 +1,0 @@
-.git
-.env
-.env.*
-.cache
-bin
-data
-*.out
